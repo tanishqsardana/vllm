@@ -1,0 +1,86 @@
+name: vLLM Throughput
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_id:
+        description: "Hugging Face model id to serve"
+        required: true
+        default: "Qwen/Qwen3-0.6B"
+      request_count:
+        description: "Number of benchmark requests"
+        required: true
+        default: "40"
+      concurrency:
+        description: "Concurrent workers"
+        required: true
+        default: "4"
+      max_tokens:
+        description: "Max output tokens per request"
+        required: true
+        default: "128"
+  push:
+    paths:
+      - "Dockerfile"
+      - "scripts/throughput_benchmark.py"
+      - ".github/workflows/throughput.yml"
+
+jobs:
+  benchmark:
+    runs-on: [self-hosted, linux, x64, gpu]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          DOCKER_BUILDKIT=1 docker build --no-cache \
+            --build-arg MODEL_ID="${{ github.event.inputs.model_id || 'Qwen/Qwen3-0.6B' }}" \
+            --build-arg DOWNLOAD_WEIGHTS=1 \
+            -t qwen3-vllm-ci .
+
+      - name: Start server
+        run: |
+          docker rm -f qwen3-vllm-ci-run >/dev/null 2>&1 || true
+          docker run -d --name qwen3-vllm-ci-run --gpus all -p 8000:8000 \
+            qwen3-vllm-ci
+
+      - name: Wait for API
+        run: |
+          for i in $(seq 1 180); do
+            if curl -sS -m 3 -H "Authorization: Bearer changeme" \
+              http://127.0.0.1:8000/v1/models >/tmp/models.json; then
+              cat /tmp/models.json
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Server did not become ready in time"
+          docker logs qwen3-vllm-ci-run || true
+          exit 1
+
+      - name: Run throughput benchmark
+        run: |
+          python3 scripts/throughput_benchmark.py \
+            --base-url http://127.0.0.1:8000 \
+            --api-key changeme \
+            --requests "${{ github.event.inputs.request_count || '40' }}" \
+            --concurrency "${{ github.event.inputs.concurrency || '4' }}" \
+            --max-tokens "${{ github.event.inputs.max_tokens || '128' }}" \
+            --output-json throughput_result.json
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: throughput-result
+          path: throughput_result.json
+
+      - name: Dump server logs
+        if: always()
+        run: docker logs qwen3-vllm-ci-run || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f qwen3-vllm-ci-run || true

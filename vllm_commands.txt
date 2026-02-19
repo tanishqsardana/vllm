@@ -1,0 +1,41 @@
+Build (no cache, bake weights, public model):
+  DOCKER_BUILDKIT=1 docker build --no-cache \
+    --build-arg MODEL_ID=Qwen/Qwen3-0.6B \
+    --build-arg DOWNLOAD_WEIGHTS=1 \
+    -t qwen3-vllm-fresh .
+
+Run on VM (port 8000 exposed, GPU):
+  docker run --rm --gpus all -p 8000:8000 \
+    -v ~/.cache/huggingface:/data/hf-cache \
+    qwen3-vllm-fresh
+
+Health check (on VM):
+  curl http://127.0.0.1:8000/health
+
+List models (note served name):
+  curl -H "Authorization: Bearer changeme" http://127.0.0.1:8000/v1/models
+
+Chat completion (non-stream):
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer changeme" \
+    -d '{
+          "model": "/models/Qwen/Qwen3-0.6B",
+          "messages": [{"role":"user","content":"Write a 2-line haiku about GPUs."}],
+          "stream": false
+        }'
+
+Chat completion (streaming):
+  curl -N -X POST http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer changeme" \
+    -d '{
+          "model": "/models/Qwen/Qwen3-0.6B",
+          "messages": [{"role":"user","content":"Tell me a quick fact about T4 GPUs."}],
+          "stream": true
+        }'
+
+Run throughput pipeline in GitHub Actions:
+  - Go to Actions -> "vLLM Throughput" -> Run workflow
+  - Set inputs (model_id/request_count/concurrency/max_tokens)
+  - Requires a self-hosted runner with labels: self-hosted, linux, x64, gpu
