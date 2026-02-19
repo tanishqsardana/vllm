@@ -39,3 +39,20 @@ Run throughput pipeline in GitHub Actions:
   - Go to Actions -> "vLLM Throughput" -> Run workflow
   - Set inputs (model_id/request_count/concurrency/max_tokens)
   - Requires a self-hosted runner with labels: self-hosted, linux, x64, gpu
+
+Run throughput benchmark script locally (CSV output):
+  python3 scripts/throughput_benchmark.py \
+    --base-url http://127.0.0.1:8000 \
+    --api-key changeme \
+    --models Qwen/Qwen3-0.6B \
+    --requests 40 \
+    --concurrency 4 \
+    --max-tokens 128 \
+    --output-csv throughput_result.csv
+
+Multiple models in one run:
+  python3 scripts/throughput_benchmark.py \
+    --base-url http://127.0.0.1:8000 \
+    --api-key changeme \
+    --models Qwen/Qwen3-0.6B,/models/Qwen/Qwen3-0.6B \
+    --output-csv throughput_result.csv

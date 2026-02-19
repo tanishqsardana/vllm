@@ -66,16 +66,17 @@ jobs:
           python3 scripts/throughput_benchmark.py \
             --base-url http://127.0.0.1:8000 \
             --api-key changeme \
+            --models "${{ github.event.inputs.model_id || 'Qwen/Qwen3-0.6B' }}" \
             --requests "${{ github.event.inputs.request_count || '40' }}" \
             --concurrency "${{ github.event.inputs.concurrency || '4' }}" \
             --max-tokens "${{ github.event.inputs.max_tokens || '128' }}" \
-            --output-json throughput_result.json
+            --output-csv throughput_result.csv
 
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
           name: throughput-result
-          path: throughput_result.json
+          path: throughput_result.csv
 
       - name: Dump server logs
         if: always()

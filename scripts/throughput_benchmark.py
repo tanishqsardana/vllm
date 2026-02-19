@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Simple throughput benchmark for an OpenAI-compatible chat endpoint."""
+"""Throughput benchmark for OpenAI-compatible chat endpoints, with CSV output."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import threading
 import time
@@ -37,41 +38,43 @@ def _get_json(url: str, api_key: str, timeout_s: int) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _resolve_model(base_url: str, api_key: str, timeout_s: int) -> str:
+def _resolve_models(base_url: str, api_key: str, timeout_s: int) -> list[str]:
     data = _get_json(f"{base_url}/v1/models", api_key, timeout_s)
     models = data.get("data", [])
     if not models:
         raise RuntimeError("No models returned by /v1/models")
-    model_id = models[0].get("id")
-    if not model_id:
-        raise RuntimeError("First model has no 'id' field")
-    return model_id
+    model_ids = []
+    for model in models:
+        model_id = model.get("id")
+        if model_id:
+            model_ids.append(model_id)
+    if not model_ids:
+        raise RuntimeError("No model ids returned by /v1/models")
+    return model_ids
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--api-key", default="changeme")
-    parser.add_argument("--model", default="")
-    parser.add_argument("--requests", type=int, default=40)
-    parser.add_argument("--concurrency", type=int, default=4)
-    parser.add_argument("--max-tokens", type=int, default=128)
-    parser.add_argument("--timeout-seconds", type=int, default=120)
-    parser.add_argument(
-        "--prompt",
-        default="Write a concise technical summary of GPU throughput tuning.",
-    )
-    parser.add_argument("--output-json", default="throughput_result.json")
-    args = parser.parse_args()
+def _parse_models(input_models: list[str]) -> list[str]:
+    models: list[str] = []
+    for item in input_models:
+        for model in item.split(","):
+            cleaned = model.strip()
+            if cleaned:
+                models.append(cleaned)
+    return models
 
-    if args.requests < 1:
-        raise ValueError("--requests must be >= 1")
-    if args.concurrency < 1:
-        raise ValueError("--concurrency must be >= 1")
 
-    model = args.model or _resolve_model(args.base_url, args.api_key, args.timeout_seconds)
+def _benchmark_model(
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    requests: int,
+    concurrency: int,
+    max_tokens: int,
+    timeout_seconds: int,
+) -> dict:
     work_queue: Queue[int] = Queue()
-    for i in range(args.requests):
+    for i in range(requests):
         work_queue.put(i)
 
     stats = {
@@ -92,16 +95,16 @@ def main() -> int:
 
             payload = {
                 "model": model,
-                "messages": [{"role": "user", "content": args.prompt}],
-                "max_tokens": args.max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
                 "stream": False,
             }
             try:
                 response = _post_json(
-                    f"{args.base_url}/v1/chat/completions",
-                    args.api_key,
+                    f"{base_url}/v1/chat/completions",
+                    api_key,
                     payload,
-                    args.timeout_seconds,
+                    timeout_seconds,
                 )
                 usage = response.get("usage", {})
                 with lock:
@@ -117,7 +120,7 @@ def main() -> int:
 
     start = time.perf_counter()
     threads = []
-    for _ in range(min(args.concurrency, args.requests)):
+    for _ in range(min(concurrency, requests)):
         t = threading.Thread(target=worker, daemon=True)
         t.start()
         threads.append(t)
@@ -125,16 +128,15 @@ def main() -> int:
     for t in threads:
         t.join()
     elapsed = time.perf_counter() - start
-
     if elapsed <= 0:
         elapsed = 1e-9
 
-    result = {
+    return {
         "model": model,
-        "base_url": args.base_url,
-        "requests": args.requests,
-        "concurrency": args.concurrency,
-        "max_tokens": args.max_tokens,
+        "base_url": base_url,
+        "requests": requests,
+        "concurrency": concurrency,
+        "max_tokens": max_tokens,
         "elapsed_seconds": round(elapsed, 3),
         "success_requests": stats["success"],
         "failed_requests": stats["fail"],
@@ -146,15 +148,75 @@ def main() -> int:
         "total_tokens": stats["total_tokens"],
     }
 
-    with open(args.output_json, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
-        f.write("\n")
 
-    print(json.dumps(result, indent=2))
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--api-key", default="changeme")
+    parser.add_argument(
+        "--models",
+        nargs="*",
+        default=[],
+        help="Model ids. Supports space-separated and comma-separated values.",
+    )
+    parser.add_argument("--requests", type=int, default=40)
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--timeout-seconds", type=int, default=120)
+    parser.add_argument(
+        "--prompt",
+        default="Write a concise technical summary of GPU throughput tuning.",
+    )
+    parser.add_argument("--output-csv", default="throughput_results.csv")
+    args = parser.parse_args()
 
-    if stats["success"] == 0:
-        return 1
-    return 0
+    if args.requests < 1:
+        raise ValueError("--requests must be >= 1")
+    if args.concurrency < 1:
+        raise ValueError("--concurrency must be >= 1")
+
+    models = _parse_models(args.models)
+    if not models:
+        models = _resolve_models(args.base_url, args.api_key, args.timeout_seconds)
+
+    results = []
+    for model in models:
+        result = _benchmark_model(
+            base_url=args.base_url,
+            api_key=args.api_key,
+            model=model,
+            prompt=args.prompt,
+            requests=args.requests,
+            concurrency=args.concurrency,
+            max_tokens=args.max_tokens,
+            timeout_seconds=args.timeout_seconds,
+        )
+        results.append(result)
+        print(json.dumps(result, indent=2))
+
+    fieldnames = [
+        "model",
+        "base_url",
+        "requests",
+        "concurrency",
+        "max_tokens",
+        "elapsed_seconds",
+        "success_requests",
+        "failed_requests",
+        "requests_per_second",
+        "completion_tokens_per_second",
+        "total_tokens_per_second",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    ]
+    with open(args.output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+
+    all_failed = all(row["success_requests"] == 0 for row in results)
+    return 1 if all_failed else 0
 
 
 if __name__ == "__main__":
