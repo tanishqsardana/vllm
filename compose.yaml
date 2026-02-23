@@ -1,0 +1,39 @@
+services:
+  engine:
+    build:
+      context: .
+      dockerfile: services/engine/Dockerfile
+      args:
+        BUILD_SHA: ${BUILD_SHA:-dev}
+        BUILD_TIME: ${BUILD_TIME:-dev}
+    image: vllm-engine:phase1
+    container_name: vllm-engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen2.5-3B-Instruct}
+      HF_TOKEN: ${HF_TOKEN:-}
+      PORT: ${PORT:-8000}
+      HOST: ${HOST:-0.0.0.0}
+      DTYPE: ${DTYPE:-}
+      TENSOR_PARALLEL: ${TENSOR_PARALLEL:-1}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:-8192}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.90}
+      BUILD_SHA: ${BUILD_SHA:-dev}
+      BUILD_TIME: ${BUILD_TIME:-dev}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - model_cache:/cache
+    gpus: all
+    runtime: nvidia
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  model_cache:
