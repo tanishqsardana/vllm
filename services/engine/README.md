@@ -22,11 +22,27 @@ This service runs a single-model vLLM OpenAI-compatible server in Docker and exp
 - `BUILD_SHA` (default: `dev`)
 - `BUILD_TIME` (default: `dev`)
 
-Model/cache data is persisted to `/cache` in the container via a named Docker volume.
+Model/cache data is persisted to `/cache` in the container via a Docker volume.
 
-## Run
+## Image-First Run (recommended for container VMs)
 
 From repo root:
+
+```bash
+./scripts/build_image.sh
+./scripts/run_image.sh
+./scripts/smoke_test.sh
+```
+
+To publish an image:
+
+```bash
+IMAGE_REPO=ghcr.io/<org>/vllm-engine IMAGE_TAG=phase1 PUSH=1 ./scripts/build_image.sh
+```
+
+Then run that pushed image on your VM/runtime by setting environment variables and mounting `/cache`.
+
+## Docker Compose (optional local workflow)
 
 ```bash
 docker compose up -d --build
@@ -46,10 +62,10 @@ curl -sS http://localhost:8000/version
 Use environment overrides:
 
 ```bash
-MODEL_ID=meta-llama/Llama-3.1-8B-Instruct MAX_MODEL_LEN=4096 docker compose up -d --build
+MODEL_ID=meta-llama/Llama-3.1-8B-Instruct MAX_MODEL_LEN=4096 ./scripts/run_image.sh
 ```
 
-Or set values in your shell/.env before running compose.
+Or set values in your shell/.env before running compose/run scripts.
 
 ## Troubleshooting
 
@@ -64,3 +80,8 @@ Or set values in your shell/.env before running compose.
   - First run downloads weights into the cache volume (`model_cache`), which can take several minutes
 - `docker compose` cannot see GPU:
   - Verify NVIDIA Container Toolkit is installed and `nvidia-smi` works on host
+- Runpod/container VM deployment:
+  - Build and push image with `./scripts/build_image.sh`
+  - Configure container env vars (`MODEL_ID`, `MAX_MODEL_LEN`, etc.)
+  - Mount persistent storage to `/cache` for model reuse
+  - Expose container port `8000`
