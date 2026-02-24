@@ -41,6 +41,7 @@ IMAGE_REPO=ghcr.io/<org>/vllm-engine IMAGE_TAG=phase1 PUSH=1 ./scripts/build_ima
 ```
 
 Then run that pushed image on your VM/runtime by setting environment variables and mounting `/cache`.
+`build_image.sh` defaults to `TARGET_PLATFORM=linux/amd64` to match NVIDIA GPU runtimes.
 
 ## Docker Compose (optional local workflow)
 
@@ -85,3 +86,6 @@ Or set values in your shell/.env before running compose/run scripts.
   - Configure container env vars (`MODEL_ID`, `MAX_MODEL_LEN`, etc.)
   - Mount persistent storage to `/cache` for model reuse
   - Expose container port `8000`
+- Build fails with `Unknown runtime environment` during `pip install vllm`:
+  - This usually means you are building `arm64` and pip is attempting a source build
+  - Build/push with `TARGET_PLATFORM=linux/amd64` (default in `build_image.sh`)
