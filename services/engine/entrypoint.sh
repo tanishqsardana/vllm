@@ -8,6 +8,7 @@ TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_PORT="${VLLM_PORT:-8001}"
+AUTO_TP_FALLBACK="${AUTO_TP_FALLBACK:-1}"
 
 export HF_HOME="${HF_HOME:-/cache/huggingface}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
@@ -33,6 +34,91 @@ PY
     DTYPE="float16"
   fi
 fi
+
+TP_SELECTED="$(
+python - <<'PY'
+import math
+import os
+import sys
+
+requested = int(os.getenv("TENSOR_PARALLEL", "1"))
+if requested < 1:
+    requested = 1
+
+model_id = os.getenv("MODEL_ID", "")
+hf_home = os.getenv("HF_HOME", "/cache/huggingface")
+hf_token = os.getenv("HF_TOKEN") or None
+auto_fallback = os.getenv("AUTO_TP_FALLBACK", "1") not in {"0", "false", "False", "no", "NO"}
+
+gpu_count = 0
+try:
+    import torch  # type: ignore
+    if torch.cuda.is_available():
+        gpu_count = int(torch.cuda.device_count())
+except Exception:
+    gpu_count = 0
+
+upper_bound = gpu_count if gpu_count > 0 else requested
+upper_bound = max(upper_bound, requested)
+
+heads = None
+vocab_size = None
+vocab_size_padded = None
+
+try:
+    from transformers import AutoConfig  # type: ignore
+
+    cfg = AutoConfig.from_pretrained(
+        model_id,
+        trust_remote_code=False,
+        cache_dir=hf_home,
+        token=hf_token,
+    )
+    heads = getattr(cfg, "num_attention_heads", None)
+    vocab_size = getattr(cfg, "vocab_size", None)
+    if isinstance(vocab_size, int) and vocab_size > 0:
+        # vLLM shards padded vocab for tensor-parallel embedding.
+        vocab_size_padded = int(math.ceil(vocab_size / 128.0) * 128)
+except Exception:
+    pass
+
+def is_valid(tp: int) -> bool:
+    if tp < 1:
+        return False
+    if gpu_count > 0 and tp > gpu_count:
+        return False
+    if isinstance(heads, int) and heads > 0 and heads % tp != 0:
+        return False
+    if isinstance(vocab_size_padded, int) and vocab_size_padded > 0 and vocab_size_padded % tp != 0:
+        return False
+    return True
+
+valid = [tp for tp in range(1, upper_bound + 1) if is_valid(tp)]
+if not valid:
+    valid = [1]
+
+if requested in valid:
+    print(requested)
+    sys.exit(0)
+
+if auto_fallback:
+    lower = [tp for tp in valid if tp <= requested]
+    selected = max(lower) if lower else min(valid)
+    sys.stderr.write(
+        f"[entrypoint] Requested TENSOR_PARALLEL={requested} is invalid for model={model_id}. "
+        f"Using TENSOR_PARALLEL={selected}. Valid values (<= visible GPUs): {valid}\n"
+    )
+    print(selected)
+    sys.exit(0)
+
+sys.stderr.write(
+    f"[entrypoint] Requested TENSOR_PARALLEL={requested} is invalid for model={model_id}. "
+    f"Valid values (<= visible GPUs): {valid}\n"
+)
+sys.exit(2)
+PY
+)"
+TENSOR_PARALLEL="${TP_SELECTED}"
 
 echo "Starting vLLM with model=${MODEL_ID} dtype=${DTYPE} tensor_parallel=${TENSOR_PARALLEL}"
 

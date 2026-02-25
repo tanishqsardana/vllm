@@ -19,6 +19,7 @@ This service runs a single-model vLLM OpenAI-compatible server in Docker and exp
 - `TENSOR_PARALLEL` (default: `1`)
 - `MAX_MODEL_LEN` (default: `8192`)
 - `GPU_MEMORY_UTILIZATION` (default: `0.90`)
+- `AUTO_TP_FALLBACK` (default: `1`; auto-adjust invalid tensor parallel to nearest valid value)
 - `BUILD_SHA` (default: `dev`)
 - `BUILD_TIME` (default: `dev`)
 - `VLLM_WORKER_MULTIPROC_METHOD` (default: `spawn`; recommended for tensor parallel > 1)
@@ -106,3 +107,7 @@ Or set values in your shell/.env before running compose/run scripts.
 - Runtime returns persistent `503` on `/healthz` with tensor parallel > 1:
   - Check logs for `Cannot re-initialize CUDA in forked subprocess`
   - Set `VLLM_WORKER_MULTIPROC_METHOD=spawn` (default in latest image) and redeploy
+- Runtime fails with `is not divisible by` after changing `TENSOR_PARALLEL`:
+  - vLLM requires tensor parallel to divide both attention heads and padded vocab shard size
+  - Latest image auto-adjusts invalid TP to nearest valid value (`AUTO_TP_FALLBACK=1`)
+  - For `Qwen/Qwen2.5-7B-Instruct`, practical TP values are `1`, `2`, `4` (on 8 GPUs, use `4`)
