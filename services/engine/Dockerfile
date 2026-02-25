@@ -11,6 +11,7 @@ ARG HTTPX_VERSION=0.28.1
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
     HF_HOME=/cache/huggingface \
     HUGGINGFACE_HUB_CACHE=/cache/huggingface/hub \
     TRANSFORMERS_CACHE=/cache/huggingface/transformers \
@@ -48,6 +49,7 @@ RUN useradd --create-home --uid 10001 --shell /bin/bash appuser \
 
 WORKDIR /app
 COPY services/engine/entrypoint.sh /app/entrypoint.sh
+COPY services/engine/sitecustomize.py /app/sitecustomize.py
 RUN chmod +x /app/entrypoint.sh
 
 USER appuser

@@ -89,3 +89,6 @@ Or set values in your shell/.env before running compose/run scripts.
 - Build fails with `Unknown runtime environment` during `pip install vllm`:
   - This usually means you are building `arm64` and pip is attempting a source build
   - Build/push with `TARGET_PLATFORM=linux/amd64` (default in `build_image.sh`)
+- Runtime fails with `Qwen2Tokenizer has no attribute all_special_tokens_extended`:
+  - Rebuild and redeploy the latest image from this repo (includes a tokenizer compatibility shim)
+  - Use `docker pull <your-image>:<tag>` on the runtime after pushing the rebuilt image
