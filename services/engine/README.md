@@ -101,7 +101,7 @@ Or set values in your shell/.env before running compose/run scripts.
   - Rebuild and redeploy the latest image from this repo (includes a tokenizer compatibility shim)
   - Use `docker pull <your-image>:<tag>` on the runtime after pushing the rebuilt image
 - Runtime fails with `tqdm_asyncio.__init__() got multiple values for keyword argument 'disable'`:
-  - Rebuild and redeploy the latest image from this repo (includes a vLLM/hf-hub tqdm compatibility shim)
+  - Rebuild and redeploy the latest image from this repo (includes a robust vLLM/hf-hub tqdm compatibility shim + pinned `huggingface_hub`/`tqdm`)
   - Ensure the runtime actually pulls the new tag before restarting
 - Runtime returns persistent `503` on `/healthz` with tensor parallel > 1:
   - Check logs for `Cannot re-initialize CUDA in forked subprocess`

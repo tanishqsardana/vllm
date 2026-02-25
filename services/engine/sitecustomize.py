@@ -24,13 +24,12 @@ except Exception:
     pass
 
 try:
-    import builtins
+    import importlib.abc
     import sys
 
-    _orig_import = builtins.__import__
+    TARGET_MODULE = "vllm.model_executor.model_loader.weight_utils"
 
-    def _patch_vllm_disabled_tqdm() -> None:
-        module = sys.modules.get("vllm.model_executor.model_loader.weight_utils")
+    def _patch_vllm_disabled_tqdm(module) -> None:
         if module is None:
             return
         if getattr(module, "_codex_tqdm_patched", False):
@@ -45,6 +44,7 @@ try:
                 def __init__(self, *args, **kwargs):
                     kwargs.pop("disable", None)
                     super().__init__(*args, **kwargs, disable=True)
+                    self.disable = True
 
             module.DisabledTqdm = PatchedDisabledTqdm
             module._codex_tqdm_patched = True
@@ -52,12 +52,37 @@ try:
             # Defer silently; module may not be fully ready yet.
             return
 
-    def _patched_import(name, globals=None, locals=None, fromlist=(), level=0):
-        mod = _orig_import(name, globals, locals, fromlist, level)
-        _patch_vllm_disabled_tqdm()
-        return mod
+    class _PatchLoader(importlib.abc.Loader):
+        def __init__(self, wrapped_loader):
+            self._wrapped_loader = wrapped_loader
 
-    builtins.__import__ = _patched_import
+        def create_module(self, spec):
+            if hasattr(self._wrapped_loader, "create_module"):
+                return self._wrapped_loader.create_module(spec)
+            return None
+
+        def exec_module(self, module):
+            self._wrapped_loader.exec_module(module)
+            _patch_vllm_disabled_tqdm(module)
+
+    class _PatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != TARGET_MODULE:
+                return None
+
+            for finder in sys.meta_path:
+                if finder is self or not hasattr(finder, "find_spec"):
+                    continue
+                spec = finder.find_spec(fullname, path, target)
+                if spec and spec.loader:
+                    spec.loader = _PatchLoader(spec.loader)
+                    return spec
+            return None
+
+    if not any(type(f).__name__ == "_PatchFinder" for f in sys.meta_path):
+        sys.meta_path.insert(0, _PatchFinder())
+
+    _patch_vllm_disabled_tqdm(sys.modules.get(TARGET_MODULE))
 except Exception:
     # Keep startup resilient if import hook cannot be installed.
     pass

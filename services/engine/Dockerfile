@@ -7,6 +7,8 @@ ARG VLLM_VERSION=0.6.4.post1
 ARG FASTAPI_VERSION=0.115.6
 ARG UVICORN_VERSION=0.32.1
 ARG HTTPX_VERSION=0.28.1
+ARG HUGGINGFACE_HUB_VERSION=0.26.5
+ARG TQDM_VERSION=4.66.5
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -42,7 +44,9 @@ RUN python -m pip install \
     "vllm==${VLLM_VERSION}" \
     "fastapi==${FASTAPI_VERSION}" \
     "uvicorn==${UVICORN_VERSION}" \
-    "httpx==${HTTPX_VERSION}"
+    "httpx==${HTTPX_VERSION}" \
+    "huggingface_hub==${HUGGINGFACE_HUB_VERSION}" \
+    "tqdm==${TQDM_VERSION}"
 
 RUN useradd --create-home --uid 10001 --shell /bin/bash appuser \
     && mkdir -p /app /cache \
