@@ -108,6 +108,14 @@ def load_or_collect_sysinfo(repo_root: Path, run_id: str, run_dir: Path) -> Dict
     return {}
 
 
+def parse_positive_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(str(value).strip())
+        return parsed if parsed > 0 else None
+    except Exception:
+        return None
+
+
 class MultiBucketSampler:
     def __init__(self, items: Sequence[Tuple[str, str]], rng: random.Random) -> None:
         self.items = list(items)
@@ -516,8 +524,11 @@ async def main() -> None:
     gpu_memory_utilization = float(
         os.getenv("GPU_MEMORY_UTILIZATION", model_cfg.get("gpu_memory_utilization", 0.90))
     )
-    tensor_parallel_size = int(
-        os.getenv("TENSOR_PARALLEL", model_cfg.get("tensor_parallel_size", 1))
+    tensor_parallel_size = (
+        parse_positive_int(os.getenv("TENSOR_PARALLEL"))
+        or parse_positive_int(os.getenv("TENSOR_PARALLEL_SIZE"))
+        or parse_positive_int(system_info.get("tensor_parallel_size"))
+        or parse_positive_int(model_cfg.get("tensor_parallel_size", 1))
     )
 
     gpu_count = int(system_info.get("gpu_topology", {}).get("gpu_count", 0) or 0)

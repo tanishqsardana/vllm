@@ -132,6 +132,21 @@ def parse_container_env(env_list):
     return env_map
 
 
+def infer_tp_from_process_args() -> str:
+    # Fallback for non-docker deployments (e.g. image launched directly on a VM).
+    ps_output = run(["ps", "-eo", "args"])
+    if not ps_output:
+        return ""
+
+    for line in ps_output.splitlines():
+        if "vllm.entrypoints.openai.api_server" not in line:
+            continue
+        match = re.search(r"--tensor-parallel-size(?:=|\s+)(\d+)", line)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def parse_docker_info(name_hint):
     container_id = run(
         ["docker", "ps", "--filter", f"name=^{name_hint}$", "--format", "{{.ID}}"]
@@ -143,13 +158,17 @@ def parse_docker_info(name_hint):
         )
 
     if not container_id:
+        inferred_tp = (
+            os.getenv("TENSOR_PARALLEL")
+            or os.getenv("TENSOR_PARALLEL_SIZE")
+            or infer_tp_from_process_args()
+            or ""
+        )
         return {
             "container_name": name_hint,
             "image_tag": "",
             "image_id": "",
-            "tensor_parallel_size": os.getenv("TENSOR_PARALLEL")
-            or os.getenv("TENSOR_PARALLEL_SIZE")
-            or "",
+            "tensor_parallel_size": inferred_tp,
         }
 
     inspect_raw = run(["docker", "inspect", container_id.splitlines()[0]])
@@ -159,6 +178,7 @@ def parse_docker_info(name_hint):
         inspect = {}
 
     env_map = parse_container_env(((inspect.get("Config") or {}).get("Env") or []))
+    inferred_tp = infer_tp_from_process_args()
 
     return {
         "container_name": (inspect.get("Name", "").lstrip("/") or name_hint),
@@ -168,6 +188,7 @@ def parse_docker_info(name_hint):
         or env_map.get("TENSOR_PARALLEL_SIZE")
         or os.getenv("TENSOR_PARALLEL")
         or os.getenv("TENSOR_PARALLEL_SIZE")
+        or inferred_tp
         or "",
     }
 

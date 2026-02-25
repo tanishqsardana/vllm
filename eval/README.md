@@ -60,3 +60,5 @@ Outputs `results/results_summary.csv` for cross-machine comparison.
   - non-streaming requests
   - system prompt: `You are a helpful assistant.`
 - GPU telemetry works with `pynvml` when available, otherwise falls back to `nvidia-smi`.
+- `tensor_parallel_size` in `results.json` is derived from (in order): local env `TENSOR_PARALLEL`/`TENSOR_PARALLEL_SIZE`, `sysinfo.json`, then preset defaults.
+- For the most accurate system and TP capture, run the harness on the same GPU VM/container that hosts vLLM.
