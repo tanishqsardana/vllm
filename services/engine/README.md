@@ -92,3 +92,6 @@ Or set values in your shell/.env before running compose/run scripts.
 - Runtime fails with `Qwen2Tokenizer has no attribute all_special_tokens_extended`:
   - Rebuild and redeploy the latest image from this repo (includes a tokenizer compatibility shim)
   - Use `docker pull <your-image>:<tag>` on the runtime after pushing the rebuilt image
+- Runtime fails with `tqdm_asyncio.__init__() got multiple values for keyword argument 'disable'`:
+  - Rebuild and redeploy the latest image from this repo (includes a vLLM/hf-hub tqdm compatibility shim)
+  - Ensure the runtime actually pulls the new tag before restarting
