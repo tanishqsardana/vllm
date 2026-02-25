@@ -21,6 +21,9 @@ This service runs a single-model vLLM OpenAI-compatible server in Docker and exp
 - `GPU_MEMORY_UTILIZATION` (default: `0.90`)
 - `BUILD_SHA` (default: `dev`)
 - `BUILD_TIME` (default: `dev`)
+- `ENABLE_SSHD` (default: `0`; set `1` to start SSH daemon in container)
+- `PUBLIC_KEY` (optional SSH public key; if set, SSH daemon auto-enables)
+- `SSH_PORT` (default: `22`)
 
 Model/cache data is persisted to `/cache` in the container via a Docker volume.
 
@@ -86,6 +89,10 @@ Or set values in your shell/.env before running compose/run scripts.
   - Configure container env vars (`MODEL_ID`, `MAX_MODEL_LEN`, etc.)
   - Mount persistent storage to `/cache` for model reuse
   - Expose container port `8000`
+- Runpod SSH in custom templates:
+  - Set `ENABLE_SSHD=1` and `PUBLIC_KEY=<your public key contents>`
+  - Expose TCP port `22`
+  - The image starts `sshd` and runs inference as `appuser`
 - Build fails with `Unknown runtime environment` during `pip install vllm`:
   - This usually means you are building `arm64` and pip is attempting a source build
   - Build/push with `TARGET_PLATFORM=linux/amd64` (default in `build_image.sh`)

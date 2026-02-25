@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
+    openssh-server \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
@@ -49,10 +50,12 @@ RUN useradd --create-home --uid 10001 --shell /bin/bash appuser \
 
 WORKDIR /app
 COPY services/engine/entrypoint.sh /app/entrypoint.sh
+COPY services/engine/bootstrap.sh /app/bootstrap.sh
 COPY services/engine/sitecustomize.py /app/sitecustomize.py
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh /app/bootstrap.sh \
+    && mkdir -p /var/run/sshd
 
-USER appuser
-EXPOSE 8000
+USER root
+EXPOSE 22 8000
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/bootstrap.sh"]
