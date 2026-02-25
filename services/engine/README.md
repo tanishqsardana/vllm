@@ -21,6 +21,7 @@ This service runs a single-model vLLM OpenAI-compatible server in Docker and exp
 - `GPU_MEMORY_UTILIZATION` (default: `0.90`)
 - `BUILD_SHA` (default: `dev`)
 - `BUILD_TIME` (default: `dev`)
+- `VLLM_WORKER_MULTIPROC_METHOD` (default: `spawn`; recommended for tensor parallel > 1)
 - `ENABLE_SSHD` (default: `0`; set `1` to start SSH daemon in container)
 - `PUBLIC_KEY` (optional SSH public key; if set, SSH daemon auto-enables)
 - `SSH_PORT` (default: `22`)
@@ -102,3 +103,6 @@ Or set values in your shell/.env before running compose/run scripts.
 - Runtime fails with `tqdm_asyncio.__init__() got multiple values for keyword argument 'disable'`:
   - Rebuild and redeploy the latest image from this repo (includes a vLLM/hf-hub tqdm compatibility shim)
   - Ensure the runtime actually pulls the new tag before restarting
+- Runtime returns persistent `503` on `/healthz` with tensor parallel > 1:
+  - Check logs for `Cannot re-initialize CUDA in forked subprocess`
+  - Set `VLLM_WORKER_MULTIPROC_METHOD=spawn` (default in latest image) and redeploy

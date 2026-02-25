@@ -24,17 +24,40 @@ except Exception:
     pass
 
 try:
-    from tqdm.asyncio import tqdm_asyncio
-    from vllm.model_executor.model_loader import weight_utils
+    import builtins
+    import sys
 
-    class PatchedDisabledTqdm(tqdm_asyncio):
-        """Avoid duplicate `disable` kwarg from mixed vLLM/hf-hub versions."""
+    _orig_import = builtins.__import__
 
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("disable", None)
-            super().__init__(*args, **kwargs, disable=True)
+    def _patch_vllm_disabled_tqdm() -> None:
+        module = sys.modules.get("vllm.model_executor.model_loader.weight_utils")
+        if module is None:
+            return
+        if getattr(module, "_codex_tqdm_patched", False):
+            return
 
-    weight_utils.DisabledTqdm = PatchedDisabledTqdm
+        try:
+            from tqdm.asyncio import tqdm_asyncio
+
+            class PatchedDisabledTqdm(tqdm_asyncio):
+                """Avoid duplicate `disable` kwarg from mixed vLLM/hf-hub versions."""
+
+                def __init__(self, *args, **kwargs):
+                    kwargs.pop("disable", None)
+                    super().__init__(*args, **kwargs, disable=True)
+
+            module.DisabledTqdm = PatchedDisabledTqdm
+            module._codex_tqdm_patched = True
+        except Exception:
+            # Defer silently; module may not be fully ready yet.
+            return
+
+    def _patched_import(name, globals=None, locals=None, fromlist=(), level=0):
+        mod = _orig_import(name, globals, locals, fromlist, level)
+        _patch_vllm_disabled_tqdm()
+        return mod
+
+    builtins.__import__ = _patched_import
 except Exception:
-    # Keep startup resilient if vLLM internals change.
+    # Keep startup resilient if import hook cannot be installed.
     pass
