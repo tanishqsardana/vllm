@@ -1,0 +1,112 @@
+short:
+  - "Explain recursion in one paragraph with a simple example."
+  - "Write a polite follow-up email after a missed meeting."
+  - "Give three healthy breakfast ideas for busy professionals."
+  - "Summarize the difference between TCP and UDP."
+  - "Draft a short product description for a noise-canceling headset."
+  - "List five interview questions for a backend engineer."
+  - "Explain what vector databases are used for."
+  - "Write a concise changelog entry for bug fixes and improvements."
+  - "Generate a SQL query to find top 10 customers by revenue."
+  - "Give a two-day travel itinerary for San Francisco."
+  - "Explain the CAP theorem in practical terms."
+  - "Draft a customer apology message for delayed shipping."
+  - "Provide a regex for validating a simple email format."
+  - "Create a short onboarding checklist for new hires."
+  - "Describe the difference between unit tests and integration tests."
+  - "Write a commit message for adding retry logic to API calls."
+  - "Suggest three names for a fintech budgeting app."
+  - "Explain deadlocks and how to avoid them."
+  - "Give a brief plan to improve page load performance."
+  - "Draft a Slack announcement for planned maintenance tonight."
+  - "Summarize the pros and cons of microservices."
+  - "Provide a Python snippet to read a JSON file safely."
+  - "Write a one-paragraph market positioning for an AI note taker."
+  - "Explain what idempotency means in APIs."
+  - "List five KPIs for an e-commerce storefront."
+  - "Draft a support response for a password reset issue."
+  - "Give an example of graceful degradation in web apps."
+  - "Write a short policy for pull request review expectations."
+  - "Explain when to use Redis versus Postgres."
+  - "Create a concise release note for version 1.2.0."
+
+medium:
+  - |
+    You are advising a startup CTO preparing for a security review.
+
+    Provide a practical 30-day plan that covers immediate risk reduction, team enablement, and policy updates.
+    Include priorities, owners, and what evidence should be collected for auditors.
+  - |
+    A retail company wants to migrate from a monolithic application to services over 12 months.
+
+    Propose a phased migration approach with milestones, rollback strategy, and dependencies between data migration, observability, and deployment tooling.
+  - |
+    Draft an incident postmortem for a 45-minute outage caused by a database connection pool exhaustion.
+
+    Include timeline, customer impact, root cause analysis, contributing factors, and concrete follow-up actions with deadlines.
+  - |
+    Design a customer support triage workflow for a SaaS product with free and paid tiers.
+
+    Explain severity classification, SLA targets, escalation rules, and which metrics should be tracked weekly.
+  - |
+    Create a technical hiring rubric for senior backend engineers.
+
+    Include interview stages, scoring dimensions, anti-bias checks, and examples of strong versus weak signals.
+  - |
+    Write a proposal for reducing cloud costs by 20% without reducing reliability.
+
+    Cover compute, storage, and network optimization, and include risk controls to avoid regressions.
+  - |
+    A product team plans to launch an AI writing feature.
+
+    Provide a launch readiness checklist that includes quality evaluation, abuse prevention, legal review, and support readiness.
+  - |
+    Build an executive summary for quarterly engineering performance.
+
+    Include delivery velocity, reliability metrics, staffing changes, and the top three risks for next quarter.
+  - |
+    Explain how to implement a robust retry strategy for external API calls in a payment system.
+
+    Discuss idempotency keys, backoff policies, circuit breaking, and observability requirements.
+  - |
+    Propose a data retention policy for a B2B analytics platform.
+
+    Address legal considerations, storage cost constraints, customer expectations, and deletion workflows.
+  - |
+    Draft architecture guidance for handling peak traffic events during a flash sale.
+
+    Include capacity planning, graceful degradation, queueing, and runbook recommendations.
+  - |
+    Create a communications plan for deprecating a legacy API endpoint over six months.
+
+    Include developer messaging, migration guides, warning schedules, and fallback support.
+  - |
+    You are coaching a new engineering manager inheriting a team with low morale and missed deadlines.
+
+    Provide a 60-day stabilization plan that balances delivery pressure with team health.
+  - |
+    A company needs to choose between self-hosted and managed vector infrastructure.
+
+    Provide a decision memo with cost, performance, operational risk, and compliance tradeoffs.
+  - |
+    Draft a quality strategy for a high-throughput chat inference API.
+
+    Include contract tests, load tests, soak tests, and criteria for release gates.
+  - |
+    Create a playbook for handling model quality regressions after an inference image update.
+
+    Include detection signals, rollback steps, and communication templates.
+  - |
+    Propose an onboarding curriculum for platform engineers supporting GPU workloads.
+
+    Include training modules, hands-on labs, and readiness checkpoints for on-call.
+  - |
+    Write an architecture note on multitenancy isolation options for inference infrastructure.
+
+    Compare hard and soft isolation approaches, and include implications for cost and reliability.
+
+long_context:
+  strategy: auto_generate
+  fill_paragraph: |
+    This is synthetic context text for long-context stress testing. It intentionally mixes narrative, requirements,
+    constraints, assumptions, and repetitive details so the prompt reaches a large token budget consistently.

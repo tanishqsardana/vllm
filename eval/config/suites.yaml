@@ -1,0 +1,32 @@
+api_contract:
+  health_timeout_s: 600
+  completion_timeout_s: 120
+
+concurrency_ladder:
+  conc_levels: [1, 5]
+  warmup_requests: 5
+  duration_s: 30
+  abort_error_rate: 0.05
+  modes: [constant, bursty]
+  burst_spike_every_s: 10
+  burst_spike_duration_s: 2
+
+mixed_prompt_fairness:
+  concurrency: 5
+  duration_s: 45
+  warmup_requests: 5
+  short_ratio: 0.70
+  medium_ratio: 0.30
+
+long_context:
+  conc_levels: [1]
+  request_count: 5
+  target_context_fraction_of_max_len: 0.75
+
+soak:
+  duration_s: 180
+  concurrency: 5
+  warmup_requests: 10
+  health_check_interval_s: 30
+  error_rate_fail_threshold: 0.001
+  memory_drift_fail_threshold_percent_vram: 5.0
