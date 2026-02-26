@@ -19,3 +19,17 @@ model_presets:
     max_model_len: 8192
     gpu_memory_utilization: 0.90
     tensor_parallel_size: 1
+
+  kimi_k25:
+    model_id: moonshotai/Kimi-K2.5
+    dtype: bfloat16
+    max_model_len: 8192
+    gpu_memory_utilization: 0.90
+    tensor_parallel_size: 4
+
+  minimax_m25:
+    model_id: MiniMaxAI/MiniMax-M2.5
+    dtype: bfloat16
+    max_model_len: 8192
+    gpu_memory_utilization: 0.90
+    tensor_parallel_size: 4

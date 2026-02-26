@@ -9,6 +9,11 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_PORT="${VLLM_PORT:-8001}"
 AUTO_TP_FALLBACK="${AUTO_TP_FALLBACK:-1}"
+TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
+ENABLE_AUTO_TOOL_CHOICE="${ENABLE_AUTO_TOOL_CHOICE:-0}"
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-}"
+REASONING_PARSER="${REASONING_PARSER:-}"
+EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 
 export HF_HOME="${HF_HOME:-/cache/huggingface}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
@@ -49,6 +54,7 @@ model_id = os.getenv("MODEL_ID", "")
 hf_home = os.getenv("HF_HOME", "/cache/huggingface")
 hf_token = os.getenv("HF_TOKEN") or None
 auto_fallback = os.getenv("AUTO_TP_FALLBACK", "1") not in {"0", "false", "False", "no", "NO"}
+trust_remote_code = os.getenv("TRUST_REMOTE_CODE", "0") in {"1", "true", "True", "yes", "YES", "on", "ON"}
 
 gpu_count = 0
 try:
@@ -70,7 +76,7 @@ try:
 
     cfg = AutoConfig.from_pretrained(
         model_id,
-        trust_remote_code=False,
+        trust_remote_code=trust_remote_code,
         cache_dir=hf_home,
         token=hf_token,
     )
@@ -122,6 +128,13 @@ TENSOR_PARALLEL="${TP_SELECTED}"
 
 echo "Starting vLLM with model=${MODEL_ID} dtype=${DTYPE} tensor_parallel=${TENSOR_PARALLEL}"
 
+is_true() {
+  case "${1,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 shutdown() {
   if [[ -n "${PROXY_PID:-}" ]] && kill -0 "${PROXY_PID}" 2>/dev/null; then
     kill -TERM "${PROXY_PID}" 2>/dev/null || true
@@ -139,15 +152,42 @@ handle_signal() {
 
 trap handle_signal SIGTERM SIGINT
 
-python -m vllm.entrypoints.openai.api_server \
-  --host 127.0.0.1 \
-  --port "${VLLM_PORT}" \
-  --model "${MODEL_ID}" \
-  --dtype "${DTYPE}" \
-  --tensor-parallel-size "${TENSOR_PARALLEL}" \
-  --max-model-len "${MAX_MODEL_LEN}" \
-  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
-  --download-dir "${HF_HOME}" &
+VLLM_CMD=(
+  python -m vllm.entrypoints.openai.api_server
+  --host 127.0.0.1
+  --port "${VLLM_PORT}"
+  --model "${MODEL_ID}"
+  --dtype "${DTYPE}"
+  --tensor-parallel-size "${TENSOR_PARALLEL}"
+  --max-model-len "${MAX_MODEL_LEN}"
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
+  --download-dir "${HF_HOME}"
+)
+
+if is_true "${TRUST_REMOTE_CODE}"; then
+  VLLM_CMD+=(--trust-remote-code)
+fi
+
+if is_true "${ENABLE_AUTO_TOOL_CHOICE}"; then
+  VLLM_CMD+=(--enable-auto-tool-choice)
+fi
+
+if [[ -n "${TOOL_CALL_PARSER}" ]]; then
+  VLLM_CMD+=(--tool-call-parser "${TOOL_CALL_PARSER}")
+fi
+
+if [[ -n "${REASONING_PARSER}" ]]; then
+  VLLM_CMD+=(--reasoning-parser "${REASONING_PARSER}")
+fi
+
+if [[ -n "${EXTRA_VLLM_ARGS}" ]]; then
+  # EXTRA_VLLM_ARGS is split by shell word rules, e.g. '--foo x --bar=y'.
+  # shellcheck disable=SC2206
+  EXTRA_ARGS=( ${EXTRA_VLLM_ARGS} )
+  VLLM_CMD+=("${EXTRA_ARGS[@]}")
+fi
+
+"${VLLM_CMD[@]}" &
 VLLM_PID=$!
 
 python - <<'PY' &

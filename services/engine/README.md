@@ -20,6 +20,11 @@ This service runs a single-model vLLM OpenAI-compatible server in Docker and exp
 - `MAX_MODEL_LEN` (default: `8192`)
 - `GPU_MEMORY_UTILIZATION` (default: `0.90`)
 - `AUTO_TP_FALLBACK` (default: `1`; auto-adjust invalid tensor parallel to nearest valid value)
+- `TRUST_REMOTE_CODE` (default: `0`; set `1` to pass `--trust-remote-code` to vLLM)
+- `ENABLE_AUTO_TOOL_CHOICE` (default: `0`; set `1` to pass `--enable-auto-tool-choice`)
+- `TOOL_CALL_PARSER` (optional; passed as `--tool-call-parser <value>`)
+- `REASONING_PARSER` (optional; passed as `--reasoning-parser <value>`)
+- `EXTRA_VLLM_ARGS` (optional; extra args appended to vLLM server command)
 - `BUILD_SHA` (default: `dev`)
 - `BUILD_TIME` (default: `dev`)
 - `VLLM_WORKER_MULTIPROC_METHOD` (default: `spawn`; recommended for tensor parallel > 1)
@@ -69,6 +74,19 @@ Use environment overrides:
 
 ```bash
 MODEL_ID=meta-llama/Llama-3.1-8B-Instruct MAX_MODEL_LEN=4096 ./scripts/run_image.sh
+```
+
+Remote-code / tool parser example:
+
+```bash
+MODEL_ID=MiniMaxAI/MiniMax-M2.5 \
+TRUST_REMOTE_CODE=1 \
+TENSOR_PARALLEL=4 \
+ENABLE_AUTO_TOOL_CHOICE=1 \
+TOOL_CALL_PARSER=minimax_m2 \
+REASONING_PARSER=minimax_m2_append_think \
+SAFETENSORS_FAST_GPU=1 \
+./scripts/run_image.sh
 ```
 
 Or set values in your shell/.env before running compose/run scripts.
