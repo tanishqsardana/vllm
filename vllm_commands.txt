@@ -1,58 +1,77 @@
-Build (no cache, bake weights, public model):
-  DOCKER_BUILDKIT=1 docker build --no-cache \
-    --build-arg MODEL_ID=Qwen/Qwen3-0.6B \
-    --build-arg DOWNLOAD_WEIGHTS=1 \
-    -t qwen3-vllm-fresh .
+Phase 2 (Combined Image) quick commands
 
-Run on VM (port 8000 exposed, GPU):
-  docker run --rm --gpus all -p 8000:8000 \
-    -v ~/.cache/huggingface:/data/hf-cache \
-    qwen3-vllm-fresh
+Build local image (amd64):
+  TARGET_PLATFORM=linux/amd64 ./scripts/build_combined_image.sh
 
-Health check (on VM):
-  curl http://127.0.0.1:8000/health
+Build and push to Docker Hub:
+  IMAGE_REPO=docker.io/<dockerhub-user>/vllm-combined IMAGE_TAG=phase2 PUSH=1 TARGET_PLATFORM=linux/amd64 ./scripts/build_combined_image.sh
 
-List models (note served name):
-  curl -H "Authorization: Bearer changeme" http://127.0.0.1:8000/v1/models
+Tag/push existing local image manually:
+  docker tag vllm-combined:phase2 docker.io/<dockerhub-user>/vllm-combined:phase2
+  docker push docker.io/<dockerhub-user>/vllm-combined:phase2
 
-Chat completion (non-stream):
-curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+Run locally (GPU host):
+  docker run --rm -it --gpus all -p 8000:8000 \
+    -v model_cache:/cache \
+    -v controlplane_data:/data \
+    -e MODEL_ID=Qwen/Qwen2.5-3B-Instruct \
+    -e ADMIN_TOKEN=$(openssl rand -hex 32) \
+    -e BUILD_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo dev) \
+    -e BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+    vllm-combined:phase2
+
+Health/version checks:
+  curl -sS http://localhost:8000/livez
+  curl -sS http://localhost:8000/healthz
+  curl -sS http://localhost:8000/version
+
+Acceptance smoke test (includes admin header rejection checks):
+  ADMIN_TOKEN=<admin-token> BASE_URL=http://localhost:8000 ./scripts/phase2_smoke.sh
+
+Admin-unavailable mode (run against deployment started without ADMIN_TOKEN):
+  EXPECT_ADMIN_UNAVAILABLE=1 BASE_URL=http://localhost:8000 ./scripts/phase2_smoke.sh
+
+Create tenant:
+  ADMIN_TOKEN=<admin-token> BASE_URL=http://localhost:8000 ./scripts/create_tenant.sh tenant-a
+
+List tenants:
+  curl -sS http://localhost:8000/admin/tenants -H "X-Admin-Token: <admin-token>"
+
+Set tenant limits (by tenant id or name):
+  ADMIN_TOKEN=<admin-token> BASE_URL=http://localhost:8000 ./scripts/set_tenant_limits.sh tenant-a standard
+
+Set tenant limits with overrides:
+  MAX_CONCURRENT=3 RPM_LIMIT=240 TPM_LIMIT=180000 \
+  ADMIN_TOKEN=<admin-token> BASE_URL=http://localhost:8000 \
+  ./scripts/set_tenant_limits.sh tenant-a standard
+
+Tenant inference call:
+  curl -sS http://localhost:8000/v1/chat/completions \
+    -H "Authorization: Bearer <tenant-api-key>" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer changeme" \
-    -d '{
-          "model": "/models/Qwen/Qwen3-0.6B",
-          "messages": [{"role":"user","content":"Write a 2-line haiku about GPUs."}],
-          "stream": false
-        }'
+    -d '{"model":"ignored","messages":[{"role":"user","content":"hello"}],"max_tokens":64}'
 
-Chat completion (streaming):
-  curl -N -X POST http://127.0.0.1:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer changeme" \
-    -d '{
-          "model": "/models/Qwen/Qwen3-0.6B",
-          "messages": [{"role":"user","content":"Tell me a quick fact about T4 GPUs."}],
-          "stream": true
-        }'
+Usage rollup:
+  curl -sS "http://localhost:8000/admin/usage?window=1h" -H "X-Admin-Token: <admin-token>"
+  curl -sS "http://localhost:8000/admin/usage?window=24h" -H "X-Admin-Token: <admin-token>"
+  curl -sS "http://localhost:8000/admin/usage?window=7d" -H "X-Admin-Token: <admin-token>"
 
-Run throughput pipeline in GitHub Actions:
-  - Go to Actions -> "vLLM Throughput" -> Run workflow
-  - Set inputs (model_id/request_count/concurrency/max_tokens)
-  - Requires a self-hosted runner with labels: self-hosted, linux, x64, gpu
+Admin auth rejection checks:
+  # Missing header => 401 unauthorized
+  curl -i http://localhost:8000/admin/tenants
+  # Wrong token => 401 unauthorized
+  curl -i http://localhost:8000/admin/tenants -H "X-Admin-Token: wrong-token"
 
-Run throughput benchmark script locally (CSV output):
-  python3 scripts/throughput_benchmark.py \
-    --base-url http://127.0.0.1:8000 \
-    --api-key changeme \
-    --models Qwen/Qwen3-0.6B \
-    --requests 40 \
-    --concurrency 4 \
-    --max-tokens 128 \
-    --output-csv throughput_result.csv
-
-Multiple models in one run:
-  python3 scripts/throughput_benchmark.py \
-    --base-url http://127.0.0.1:8000 \
-    --api-key changeme \
-    --models Qwen/Qwen3-0.6B,/models/Qwen/Qwen3-0.6B \
-    --output-csv throughput_result.csv
+Runpod steps (single image):
+  1) Push image tag: docker.io/<dockerhub-user>/vllm-combined:phase2
+  2) Create GPU pod with image above
+  3) Expose port 8000
+  4) Set env vars at least: MODEL_ID, ADMIN_TOKEN
+  5) Recommended envs:
+     DB_PATH=/workspace/data/controlplane.db
+     HF_HOME=/workspace/cache/huggingface
+     HUGGINGFACE_HUB_CACHE=/workspace/cache/huggingface/hub
+     TRANSFORMERS_CACHE=/workspace/cache/huggingface/transformers
+     VLLM_CACHE_ROOT=/workspace/cache/vllm
+  6) Use Runpod proxy URL as BASE_URL, then run:
+     ADMIN_TOKEN=<admin-token> BASE_URL=<runpod-url> ./scripts/phase2_smoke.sh
