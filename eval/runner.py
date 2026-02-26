@@ -93,6 +93,23 @@ def write_request_csv(path: Path, records: Sequence[Dict[str, Any]]) -> None:
         writer.writerows(records)
 
 
+def resolve_model_id(requested_model_id: str, available_model_ids: Sequence[str]) -> Tuple[str, str]:
+    available = [m for m in available_model_ids if isinstance(m, str) and m.strip()]
+    if not available:
+        return requested_model_id, "unchanged"
+    if requested_model_id in available:
+        return requested_model_id, "unchanged"
+    if len(available) == 1:
+        return available[0], "single_available"
+
+    req_tail = requested_model_id.split("/")[-1].lower()
+    tail_matches = [m for m in available if m.split("/")[-1].lower() == req_tail]
+    if len(tail_matches) == 1:
+        return tail_matches[0], "tail_match"
+
+    return requested_model_id, "not_found"
+
+
 def load_or_collect_sysinfo(repo_root: Path, run_id: str, run_dir: Path) -> Dict[str, Any]:
     sysinfo_path = run_dir / "sysinfo.json"
     if not sysinfo_path.exists():
@@ -573,6 +590,36 @@ async def main() -> None:
 
     try:
         async with OpenAICompatClient(args.base_url, model_id=model_id) as client:
+            models_status, models_payload, _ = await client.get_status_json("/v1/models")
+            served_model_ids: List[str] = []
+            if models_status == 200 and isinstance(models_payload, dict):
+                data = models_payload.get("data")
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and isinstance(item.get("id"), str):
+                            served_model_ids.append(item["id"])
+
+            resolved_model_id, resolution_reason = resolve_model_id(model_id, served_model_ids)
+            if resolution_reason in {"single_available", "tail_match"} and resolved_model_id != model_id:
+                print(
+                    f"[runner] Requested model_id={model_id} not listed by endpoint; "
+                    f"using served model_id={resolved_model_id} (reason={resolution_reason})"
+                )
+                model_id = resolved_model_id
+                client.model_id = resolved_model_id
+
+            if resolution_reason == "not_found":
+                raise SystemExit(
+                    "Model id mismatch: requested model_id="
+                    f"{model_id} not in served models {served_model_ids}. "
+                    "Set MODEL_ID to one of the served ids or use a matching preset."
+                )
+
+            results["model"]["requested_model_id"] = os.getenv("MODEL_ID", model_cfg.get("model_id", ""))
+            results["model"]["model_id"] = model_id
+            results["model"]["resolved_model_id"] = model_id
+            results["served_model_ids"] = served_model_ids
+
             api_cfg = suites_cfg.get("api_contract", {})
             api_summary, api_records = await run_api_contract(
                 client,
