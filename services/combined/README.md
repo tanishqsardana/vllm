@@ -48,6 +48,8 @@ Gateway endpoints:
 - `BUILD_TIME` (default: `dev`)
 - `GATEWAY_HOST` (default: `0.0.0.0`)
 - `GATEWAY_PORT` (default: `8000`)
+- `METRICS_TENANT_LABELS` (default: `on`; set `off` to drop `tenant_id` metric labels)
+- `GPU_METRICS_POLL_INTERVAL_SECONDS` (default: `2`)
 
 ### Cache / model download compatibility (Phase 1 compatible)
 
@@ -228,3 +230,16 @@ docker buildx build --platform linux/amd64 -f services/combined/Dockerfile -t vl
 - Tenant API keys are returned only once at creation. DB stores only SHA-256 hashes.
 - RPM/TPM limiters are in-memory in Phase 2; use Redis later for multi-instance/shared state.
 - SQLite tables are created automatically on startup if missing.
+
+## Observability (Phase 3)
+
+- `GET /metrics` is available in Prometheus exposition format.
+- `GET /metrics` requires `X-Admin-Token` and uses the same token as admin endpoints.
+- See full setup and dashboard docs in [docs/OBSERVABILITY.md](/Users/tanishqsardana/Documents/Startup/docs/OBSERVABILITY.md).
+
+Quick check:
+
+```bash
+curl -i http://localhost:8000/metrics
+curl -sS -H "X-Admin-Token: <ADMIN_TOKEN>" http://localhost:8000/metrics | head
+```

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -15,7 +17,10 @@ from importlib.metadata import PackageNotFoundError, version
 from .accounting import extract_usage, parse_window, record_request, usage_rollup
 from .auth import authenticate_tenant, generate_api_key, hash_api_key, parse_bearer_token, verify_admin_token
 from .db import Database
+from .gpu_metrics import GPUMetricsPoller
 from .limits import ConcurrencyManager
+from .metrics import GatewayMetrics
+from .middleware_metrics import GatewayMetricsMiddleware
 from .rate_limit import TenantRateLimiter
 from .schemas import (
     ChatCompletionPayload,
@@ -47,6 +52,8 @@ class Settings:
     default_max_context_tokens: int
     default_max_output_tokens: int
     trust_remote_code: bool
+    metrics_tenant_labels: bool
+    gpu_metrics_poll_interval_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -58,6 +65,10 @@ class Settings:
             vllm_version = version("vllm")
         except PackageNotFoundError:
             vllm_version = "unknown"
+
+        metrics_tenant_labels = os.getenv("METRICS_TENANT_LABELS", "on").strip().lower()
+        if metrics_tenant_labels not in {"on", "off"}:
+            raise RuntimeError("METRICS_TENANT_LABELS must be one of: on, off")
 
         return cls(
             model_id=model_id,
@@ -76,10 +87,13 @@ class Settings:
             default_max_context_tokens=int(os.getenv("DEFAULT_MAX_CONTEXT_TOKENS", "8192")),
             default_max_output_tokens=int(os.getenv("DEFAULT_MAX_OUTPUT_TOKENS", "512")),
             trust_remote_code=os.getenv("TRUST_REMOTE_CODE", "0").lower() in {"1", "true", "yes", "on"},
+            metrics_tenant_labels=metrics_tenant_labels == "on",
+            gpu_metrics_poll_interval_seconds=float(os.getenv("GPU_METRICS_POLL_INTERVAL_SECONDS", "2")),
         )
 
 
 app = FastAPI(title="control-plane-gateway", docs_url=None, redoc_url=None)
+app.add_middleware(GatewayMetricsMiddleware)
 
 
 def error_response(status_code: int, error_type: str, message: str, request_id: str | None = None) -> JSONResponse:
@@ -118,18 +132,31 @@ async def startup() -> None:
         trust_remote_code=settings.trust_remote_code,
     )
 
+    metrics = GatewayMetrics(tenant_labels_enabled=settings.metrics_tenant_labels)
+    metrics.set_engine_healthy(False)
+
+    gpu_metrics_poller = GPUMetricsPoller(
+        metrics=metrics,
+        poll_interval_seconds=settings.gpu_metrics_poll_interval_seconds,
+    )
+    await gpu_metrics_poller.start()
+
     app.state.settings = settings
     app.state.db = db
     app.state.http_client = http_client
     app.state.rate_limiter = TenantRateLimiter()
     app.state.concurrency = ConcurrencyManager(settings.global_max_concurrent)
     app.state.estimator = estimator
+    app.state.metrics = metrics
+    app.state.gpu_metrics_poller = gpu_metrics_poller
 
     json_log(
         "gateway_started",
         model_id=settings.model_id,
         db_path=settings.db_path,
         global_max_concurrent=settings.global_max_concurrent,
+        metrics_tenant_labels=settings.metrics_tenant_labels,
+        gpu_metrics_poll_interval_seconds=settings.gpu_metrics_poll_interval_seconds,
     )
 
 
@@ -137,7 +164,9 @@ async def startup() -> None:
 async def shutdown() -> None:
     client: httpx.AsyncClient = app.state.http_client
     db: Database = app.state.db
+    gpu_metrics_poller: GPUMetricsPoller = app.state.gpu_metrics_poller
 
+    await gpu_metrics_poller.stop()
     await client.aclose()
     db.close()
 
@@ -199,6 +228,44 @@ async def _probe_upstream() -> bool:
         return False
 
 
+def _record_request_with_metrics(
+    *,
+    metrics: GatewayMetrics,
+    db: Database,
+    ts_start: str,
+    ts_end: str,
+    latency_ms_value: int,
+    tenant_id: str,
+    model_id: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    status_code: int,
+    error_type: str | None,
+    request_id: str,
+) -> None:
+    start = time.perf_counter()
+    ok = False
+    try:
+        record_request(
+            db=db,
+            ts_start=ts_start,
+            ts_end=ts_end,
+            latency_ms=latency_ms_value,
+            tenant_id=tenant_id,
+            model_id=model_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            status_code=status_code,
+            error_type=error_type,
+            request_id=request_id,
+        )
+        ok = True
+    finally:
+        metrics.observe_db_write(duration_seconds=max(0.0, time.perf_counter() - start), ok=ok)
+
+
 @app.get("/livez")
 async def livez() -> dict[str, str]:
     return {"status": "alive"}
@@ -207,9 +274,11 @@ async def livez() -> dict[str, str]:
 @app.get("/healthz")
 async def healthz() -> JSONResponse:
     db: Database = app.state.db
+    metrics: GatewayMetrics = app.state.metrics
 
     db_ok = db.health_check()
     upstream_ok = await _probe_upstream()
+    metrics.set_engine_healthy(upstream_ok)
 
     if db_ok and upstream_ok:
         return JSONResponse({"status": "ready"}, status_code=200)
@@ -233,6 +302,37 @@ async def gateway_version() -> GatewayVersion:
         model_id=settings.model_id,
         vllm_version=settings.vllm_version,
     )
+
+
+@app.get("/metrics")
+async def metrics_endpoint(x_admin_token: str | None = Header(default=None)) -> Response:
+    settings: Settings = app.state.settings
+    metrics: GatewayMetrics = app.state.metrics
+
+    if not settings.admin_token:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "type": "admin_unavailable",
+                    "message": "metrics unavailable: ADMIN_TOKEN is not configured",
+                }
+            },
+        )
+
+    if not x_admin_token:
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"type": "unauthorized", "message": "missing X-Admin-Token header"}},
+        )
+
+    if not hmac.compare_digest(settings.admin_token, x_admin_token):
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"type": "unauthorized", "message": "invalid admin token"}},
+        )
+
+    return metrics.response()
 
 
 @app.post("/admin/tenants", response_model=TenantCreateResponse)
@@ -333,6 +433,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     limiter: TenantRateLimiter = app.state.rate_limiter
     concurrency: ConcurrencyManager = app.state.concurrency
     estimator: TokenEstimator = app.state.estimator
+    metrics: GatewayMetrics = app.state.metrics
 
     start = utc_now()
     ts_start = to_iso(start)
@@ -341,13 +442,16 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     try:
         api_key = parse_bearer_token(authorization)
     except HTTPException as exc:
+        metrics.inc_rejection(reason="auth", tenant_id=None, tenant_name=None)
         return error_response(exc.status_code, "unauthorized", exc.detail["error"]["message"], request_id=request_id)
 
     tenant = authenticate_tenant(api_key, db)
     if tenant is None:
+        metrics.inc_rejection(reason="auth", tenant_id=None, tenant_name=None)
         return error_response(401, "unauthorized", "invalid API key", request_id=request_id)
 
     tenant_id = tenant["tenant_id"]
+    tenant_name = tenant["tenant_name"]
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
@@ -356,18 +460,22 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     tenant_acquired = False
     tpm_reserved = 0
 
-    def finalize_error(code: int, etype: str, message: str) -> JSONResponse:
+    def finalize_error(code: int, etype: str, message: str, rejection_reason: str | None = None) -> JSONResponse:
         nonlocal total_tokens
         total_tokens = prompt_tokens + completion_tokens
+
+        if rejection_reason is not None:
+            metrics.inc_rejection(reason=rejection_reason, tenant_id=tenant_id, tenant_name=tenant_name)
 
         end = utc_now()
         ts_end = to_iso(end)
         elapsed_ms = latency_ms(start, end)
-        record_request(
+        _record_request_with_metrics(
+            metrics=metrics,
             db=db,
             ts_start=ts_start,
             ts_end=ts_end,
-            latency_ms=elapsed_ms,
+            latency_ms_value=elapsed_ms,
             tenant_id=tenant_id,
             model_id=settings.model_id,
             prompt_tokens=prompt_tokens,
@@ -392,7 +500,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     try:
         body = await request.body()
         if len(body) > settings.max_body_bytes:
-            return finalize_error(413, "bad_input", f"request body exceeds MAX_BODY_BYTES={settings.max_body_bytes}")
+            return finalize_error(
+                413,
+                "bad_input",
+                f"request body exceeds MAX_BODY_BYTES={settings.max_body_bytes}",
+                rejection_reason="body_too_large",
+            )
 
         try:
             payload = json.loads(body)
@@ -415,12 +528,19 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 400,
                 "bad_input",
                 f"prompt tokens exceed max_context_tokens ({prompt_tokens} > {tenant['max_context_tokens']})",
+                rejection_reason="max_context",
             )
 
         try:
-            _, clamped_max_tokens = _resolve_requested_max_tokens(payload, int(tenant["max_output_tokens"]))
+            requested_max_tokens, clamped_max_tokens = _resolve_requested_max_tokens(
+                payload,
+                int(tenant["max_output_tokens"]),
+            )
         except ValueError as exc:
-            return finalize_error(400, "bad_input", str(exc))
+            return finalize_error(400, "bad_input", str(exc), rejection_reason="max_output")
+
+        if requested_max_tokens > int(tenant["max_output_tokens"]):
+            metrics.inc_rejection(reason="max_output", tenant_id=tenant_id, tenant_name=tenant_name)
 
         payload["max_tokens"] = clamped_max_tokens
         if "max_completion_tokens" in payload:
@@ -430,20 +550,30 @@ async def chat_completions(request: Request, authorization: str | None = Header(
 
         global_acquired = await concurrency.try_acquire_global()
         if not global_acquired:
-            return finalize_error(429, "limit_concurrent", "global concurrent request limit exceeded")
+            return finalize_error(
+                429,
+                "limit_concurrent",
+                "global concurrent request limit exceeded",
+                rejection_reason="limit_concurrent",
+            )
 
         tenant_acquired = await concurrency.try_acquire_tenant(tenant_id, int(tenant["max_concurrent"]))
         if not tenant_acquired:
-            return finalize_error(429, "limit_concurrent", "tenant concurrent request limit exceeded")
+            return finalize_error(
+                429,
+                "limit_concurrent",
+                "tenant concurrent request limit exceeded",
+                rejection_reason="limit_concurrent",
+            )
 
         rpm_ok = await limiter.allow_request(tenant_id, int(tenant["rpm_limit"]))
         if not rpm_ok:
-            return finalize_error(429, "limit_rpm", "tenant rpm_limit exceeded")
+            return finalize_error(429, "limit_rpm", "tenant rpm_limit exceeded", rejection_reason="limit_rpm")
 
         tpm_reserved = prompt_tokens + clamped_max_tokens
         tpm_ok = await limiter.reserve_tokens(tenant_id, int(tenant["tpm_limit"]), tpm_reserved)
         if not tpm_ok:
-            return finalize_error(429, "limit_tpm", "tenant tpm_limit exceeded")
+            return finalize_error(429, "limit_tpm", "tenant tpm_limit exceeded", rejection_reason="limit_tpm")
 
         forward_headers = {
             k: v
@@ -453,6 +583,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         forward_headers["x-request-id"] = request_id
 
         upstream_response: httpx.Response
+        upstream_start = time.perf_counter()
         try:
             upstream_response = await client.post(
                 f"{settings.upstream_url}/v1/chat/completions",
@@ -461,13 +592,23 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 headers=forward_headers,
             )
         except httpx.TimeoutException:
+            metrics.observe_upstream(status="timeout", duration_seconds=max(0.0, time.perf_counter() - upstream_start))
+            metrics.set_engine_healthy(False)
             if tpm_reserved > prompt_tokens:
                 await limiter.refund_tokens(tenant_id, tpm_reserved - prompt_tokens)
             return finalize_error(504, "timeout", "upstream request timed out")
         except httpx.HTTPError as exc:
+            metrics.observe_upstream(status="error", duration_seconds=max(0.0, time.perf_counter() - upstream_start))
+            metrics.set_engine_healthy(False)
             if tpm_reserved > prompt_tokens:
                 await limiter.refund_tokens(tenant_id, tpm_reserved - prompt_tokens)
             return finalize_error(502, "upstream_5xx", f"upstream request failed: {exc}")
+
+        metrics.observe_upstream(
+            status=str(upstream_response.status_code),
+            duration_seconds=max(0.0, time.perf_counter() - upstream_start),
+        )
+        metrics.set_engine_healthy(upstream_response.status_code < 500)
 
         response_json: dict[str, Any] | None = None
         content_type = upstream_response.headers.get("content-type", "")
@@ -488,11 +629,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         end = utc_now()
         ts_end = to_iso(end)
         elapsed_ms = latency_ms(start, end)
-        record_request(
+        _record_request_with_metrics(
+            metrics=metrics,
             db=db,
             ts_start=ts_start,
             ts_end=ts_end,
-            latency_ms=elapsed_ms,
+            latency_ms_value=elapsed_ms,
             tenant_id=tenant_id,
             model_id=settings.model_id,
             prompt_tokens=prompt_tokens,
@@ -502,6 +644,15 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             error_type=error_type,
             request_id=request_id,
         )
+
+        if status_code < 400:
+            metrics.add_tokens(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                tenant_id=tenant_id,
+                tenant_name=tenant_name,
+            )
 
         json_log(
             "request_complete",

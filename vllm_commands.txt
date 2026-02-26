@@ -56,6 +56,16 @@ Usage rollup:
   curl -sS "http://localhost:8000/admin/usage?window=24h" -H "X-Admin-Token: <admin-token>"
   curl -sS "http://localhost:8000/admin/usage?window=7d" -H "X-Admin-Token: <admin-token>"
 
+Metrics endpoint checks:
+  # Missing header => 401 unauthorized
+  curl -i http://localhost:8000/metrics
+  # Correct header => Prometheus text format
+  curl -sS -H "X-Admin-Token: <admin-token>" http://localhost:8000/metrics | head
+
+Observe key metrics:
+  curl -sS -H "X-Admin-Token: <admin-token>" http://localhost:8000/metrics \
+    | rg "gateway_http_requests_total|gateway_rejections_total|gateway_engine_healthy|^gpu_"
+
 Admin auth rejection checks:
   # Missing header => 401 unauthorized
   curl -i http://localhost:8000/admin/tenants
@@ -75,3 +85,15 @@ Runpod steps (single image):
      VLLM_CACHE_ROOT=/workspace/cache/vllm
   6) Use Runpod proxy URL as BASE_URL, then run:
      ADMIN_TOKEN=<admin-token> BASE_URL=<runpod-url> ./scripts/phase2_smoke.sh
+
+Monitoring pack (outside Runpod container):
+  1) Update monitoring/prometheus/prometheus.yml:
+     - set target host (Runpod proxy host only, no https://)
+     - set X-Admin-Token header value
+  2) Start stack:
+     docker compose -f monitoring/compose.yaml up -d --build
+  3) Open:
+     Prometheus: http://localhost:9090
+     Grafana: http://localhost:3000 (admin/admin)
+  4) Dashboard auto-provisioned:
+     vLLM Control Plane Observability

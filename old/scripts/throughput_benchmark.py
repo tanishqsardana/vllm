@@ -12,34 +12,77 @@ import urllib.error
 import urllib.request
 from queue import Empty, Queue
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/123.0.0.0 Safari/537.36"
+)
 
-def _post_json(url: str, api_key: str, payload: dict, timeout_s: int) -> dict:
+
+def _build_headers(api_key: str, user_agent: str, *, json_body: bool) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+    }
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _post_json(
+    url: str,
+    api_key: str,
+    payload: dict,
+    timeout_s: int,
+    *,
+    user_agent: str,
+    retries: int,
+    retry_backoff_s: float,
+) -> dict:
     body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url=url,
-        method="POST",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    attempts = max(0, retries) + 1
+    last_exc: Exception | None = None
+
+    for attempt in range(attempts):
+        req = urllib.request.Request(
+            url=url,
+            method="POST",
+            data=body,
+            headers=_build_headers(api_key, user_agent, json_body=True),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            retryable = exc.code in {403, 429, 500, 502, 503, 504}
+            if (not retryable) or attempt == attempts - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                raise
+
+        time.sleep(max(0.0, retry_backoff_s) * (attempt + 1))
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("request attempts exhausted unexpectedly")
 
 
-def _get_json(url: str, api_key: str, timeout_s: int) -> dict:
+def _get_json(url: str, api_key: str, timeout_s: int, *, user_agent: str) -> dict:
     req = urllib.request.Request(
         url=url,
         method="GET",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=_build_headers(api_key, user_agent, json_body=False),
     )
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _resolve_models(base_url: str, api_key: str, timeout_s: int) -> list[str]:
-    data = _get_json(f"{base_url}/v1/models", api_key, timeout_s)
+def _resolve_models(base_url: str, api_key: str, timeout_s: int, *, user_agent: str) -> list[str]:
+    data = _get_json(f"{base_url}/v1/models", api_key, timeout_s, user_agent=user_agent)
     models = data.get("data", [])
     if not models:
         raise RuntimeError("No models returned by /v1/models")
@@ -72,6 +115,9 @@ def _benchmark_model(
     concurrency: int,
     max_tokens: int,
     timeout_seconds: int,
+    user_agent: str,
+    retries: int,
+    retry_backoff_s: float,
 ) -> dict:
     work_queue: Queue[int] = Queue()
     for i in range(requests):
@@ -84,6 +130,7 @@ def _benchmark_model(
         "completion_tokens": 0,
         "total_tokens": 0,
     }
+    first_error_logged = False
     lock = threading.Lock()
 
     def worker() -> None:
@@ -105,6 +152,9 @@ def _benchmark_model(
                     api_key,
                     payload,
                     timeout_seconds,
+                    user_agent=user_agent,
+                    retries=retries,
+                    retry_backoff_s=retry_backoff_s,
                 )
                 usage = response.get("usage", {})
                 with lock:
@@ -112,9 +162,17 @@ def _benchmark_model(
                     stats["prompt_tokens"] += int(usage.get("prompt_tokens", 0))
                     stats["completion_tokens"] += int(usage.get("completion_tokens", 0))
                     stats["total_tokens"] += int(usage.get("total_tokens", 0))
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
                 with lock:
                     stats["fail"] += 1
+                    nonlocal first_error_logged
+                    if not first_error_logged:
+                        first_error_logged = True
+                        detail = ""
+                        if isinstance(exc, urllib.error.HTTPError):
+                            detail = f" status={exc.code} body={exc.read().decode('utf-8', errors='replace')[:500]}"
+                        import sys
+                        print(f"[DEBUG] First failure: {type(exc).__name__}: {exc}{detail}", file=sys.stderr)
             finally:
                 work_queue.task_done()
 
@@ -163,6 +221,9 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--timeout-seconds", type=int, default=120)
+    parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
+    parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument("--retry-backoff-seconds", type=float, default=0.25)
     parser.add_argument(
         "--prompt",
         default="Write a concise technical summary of GPU throughput tuning.",
@@ -177,7 +238,12 @@ def main() -> int:
 
     models = _parse_models(args.models)
     if not models:
-        models = _resolve_models(args.base_url, args.api_key, args.timeout_seconds)
+        models = _resolve_models(
+            args.base_url,
+            args.api_key,
+            args.timeout_seconds,
+            user_agent=args.user_agent,
+        )
 
     results = []
     for model in models:
@@ -190,6 +256,9 @@ def main() -> int:
             concurrency=args.concurrency,
             max_tokens=args.max_tokens,
             timeout_seconds=args.timeout_seconds,
+            user_agent=args.user_agent,
+            retries=args.retries,
+            retry_backoff_s=args.retry_backoff_seconds,
         )
         results.append(result)
         print(json.dumps(result, indent=2))

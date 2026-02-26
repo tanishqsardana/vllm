@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "runpod_gateway"
+    scheme: https
+    metrics_path: /metrics
+    scrape_timeout: 4s
+    static_configs:
+      # Replace with your Runpod proxy host (without https:// prefix)
+      # Example: ju1rjbr1b0j4jh-8000.proxy.runpod.net
+      - targets: ["ch31hhvu0wv0se-8000.proxy.runpod.net"]
+    # Requires Prometheus >= 2.55
+    http_headers:
+      X-Admin-Token:
+        values: ["6f69dd6c7e01f768c30f6883ce769e06c6e38e48e8baea95613394631ec4f580"]

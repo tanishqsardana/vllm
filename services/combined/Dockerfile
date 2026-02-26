@@ -10,6 +10,8 @@ ARG HTTPX_VERSION=0.28.1
 ARG TRANSFORMERS_VERSION=4.46.3
 ARG HUGGINGFACE_HUB_VERSION=0.26.5
 ARG TQDM_VERSION=4.66.5
+ARG PROMETHEUS_CLIENT_VERSION=0.21.1
+ARG PYNVML_VERSION=11.5.3
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -46,7 +48,9 @@ RUN python -m pip install \
     "httpx==${HTTPX_VERSION}" \
     "transformers==${TRANSFORMERS_VERSION}" \
     "huggingface_hub==${HUGGINGFACE_HUB_VERSION}" \
-    "tqdm==${TQDM_VERSION}"
+    "tqdm==${TQDM_VERSION}" \
+    "prometheus_client==${PROMETHEUS_CLIENT_VERSION}" \
+    "pynvml==${PYNVML_VERSION}"
 
 RUN useradd --create-home --uid 10001 --shell /bin/bash appuser \
     && mkdir -p /app /cache /data \
