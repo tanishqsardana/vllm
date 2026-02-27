@@ -89,6 +89,18 @@ class GatewayMetrics:
             buckets=LATENCY_BUCKETS,
             registry=self.registry,
         )
+        self.budget_events_total = Counter(
+            "budget_events_total",
+            "Total budget threshold alert events.",
+            ["threshold", "tenant_id"],
+            registry=self.registry,
+        )
+        self.tenant_cost_estimated_usd = Gauge(
+            "tenant_cost_estimated_usd",
+            "Estimated tenant cost over the last 24h.",
+            ["tenant_id"],
+            registry=self.registry,
+        )
 
         self.gpu_utilization_percent = Gauge(
             "gpu_utilization_percent",
@@ -183,6 +195,12 @@ class GatewayMetrics:
         self.gateway_db_latency_seconds.observe(duration_seconds)
         if not ok:
             self.gateway_db_write_failures_total.inc()
+
+    def inc_budget_event(self, threshold: str, tenant_id: str) -> None:
+        self.budget_events_total.labels(threshold=threshold, tenant_id=tenant_id).inc()
+
+    def set_tenant_cost_estimated_usd(self, tenant_id: str, cost_usd: float) -> None:
+        self.tenant_cost_estimated_usd.labels(tenant_id=tenant_id).set(max(0.0, float(cost_usd)))
 
     def set_gpu_metrics(self, gpu_samples: list[dict[str, Any]]) -> None:
         current = {str(sample["gpu_index"]) for sample in gpu_samples}

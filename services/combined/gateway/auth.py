@@ -33,20 +33,33 @@ def parse_bearer_token(authorization_header: str | None) -> str:
     return parts[1].strip()
 
 
-def authenticate_tenant(api_key: str, db: Database) -> dict[str, Any] | None:
+def resolve_api_key(api_key: str, db: Database) -> dict[str, Any] | None:
     candidate_hash = hash_api_key(api_key)
-    rows = db.list_tenant_auth_rows()
+    rows = db.list_api_key_auth_rows()
 
     matched_row: dict[str, Any] | None = None
     for row in rows:
-        if hmac.compare_digest(candidate_hash, row["api_key_hash"]):
+        row_hash = row.get("key_hash") or ""
+        if hmac.compare_digest(candidate_hash, row_hash):
             matched_row = row
 
     if matched_row is None:
         return None
 
+    seat_id = matched_row.get("seat_id")
+    seat_ref_id = matched_row.get("seat_ref_id")
+    seat_is_active = bool(matched_row.get("seat_is_active")) if seat_ref_id is not None else False
+    seat_allowed = True if seat_id is None else (seat_ref_id is not None and seat_is_active)
+
     return {
+        "key_id": matched_row["key_id"],
         "tenant_id": matched_row["tenant_id"],
+        "seat_id": seat_id,
+        "seat_name": matched_row.get("seat_name"),
+        "role": matched_row.get("role") or ("service" if seat_id is None else "user"),
+        "revoked_at": matched_row.get("revoked_at"),
+        "tenant_is_active": bool(matched_row.get("tenant_is_active")),
+        "seat_is_active": seat_allowed,
         "tenant_name": matched_row["tenant_name"],
         "max_concurrent": int(matched_row["max_concurrent"]),
         "rpm_limit": int(matched_row["rpm_limit"]),
@@ -79,4 +92,3 @@ def verify_admin_token(configured_token: str | None, provided_token: str | None)
             status_code=401,
             detail={"error": {"type": "unauthorized", "message": "invalid admin token"}},
         )
-
