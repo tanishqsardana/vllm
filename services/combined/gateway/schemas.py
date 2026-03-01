@@ -180,6 +180,74 @@ class GatewayVersion(BaseModel):
     build_time: str
     model_id: str
     vllm_version: str
+    ui_enabled: bool
+    metrics_enabled: bool
+    admin_auth_mode: Literal["static_token", "oidc"]
+    profiles_enabled: bool
+
+
+class AuthRequirements(BaseModel):
+    needs_admin_token: bool
+    needs_jwt: bool
+    jwks_url_set: bool
+    issuer_set: bool
+    audience_set: bool
+
+
+class AuthInfoResponse(BaseModel):
+    admin_auth_mode: Literal["static_token", "oidc"]
+    requirements: AuthRequirements
+
+
+class BudgetEventPublic(BaseModel):
+    event_id: str
+    tenant_id: str
+    window: Literal["day", "week", "month"]
+    window_start: datetime
+    threshold: Literal["50", "80", "100"]
+    cost_usd: float
+    budget_usd: float
+    created_at: datetime
+
+
+class AuditEventPublic(BaseModel):
+    event_id: str
+    ts: datetime
+    admin_identity: str
+    action: str
+    resource_type: str
+    resource_id: str
+    details_json: str
+    request_id: str
+
+
+class AuditResponse(BaseModel):
+    window: Literal["1h", "24h", "7d"]
+    data: list[AuditEventPublic]
+
+
+class ProfileDefaultsTenant(BaseModel):
+    max_concurrent: int | None = None
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+    max_context_tokens: int | None = None
+    max_output_tokens: int | None = None
+
+
+class ProfileSuggestedDefaults(BaseModel):
+    global_max_concurrent: int | None = None
+    tenant_limits: ProfileDefaultsTenant | None = None
+    gpu_hourly_rate: float | None = None
+
+
+class ProfilePublic(BaseModel):
+    name: str
+    model_id: str
+    dtype: str
+    max_model_len: int
+    tensor_parallel: int
+    gpu_memory_utilization: float
+    suggested_defaults: ProfileSuggestedDefaults | None = None
 
 
 class ChatCompletionPayload(BaseModel):

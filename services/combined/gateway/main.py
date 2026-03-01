@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import json
 import os
 import sqlite3
@@ -8,12 +7,14 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response
-from importlib.metadata import PackageNotFoundError, version
+import yaml
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .accounting import (
     extract_usage,
@@ -24,7 +25,10 @@ from .accounting import (
     usage_rollup_tenants,
     window_start_for_budget,
 )
-from .auth import generate_api_key, hash_api_key, parse_bearer_token, resolve_api_key, verify_admin_token
+from .admin_auth import AdminAuthProvider, AdminPrincipal
+from .audit import log_audit_event, request_id_from_headers
+from .auth import generate_api_key, hash_api_key, parse_bearer_token, resolve_api_key
+from .config_loader import load_config
 from .db import Database
 from .gpu_metrics import GPUMetricsPoller
 from .limits import ConcurrencyManager
@@ -32,12 +36,17 @@ from .metrics import GatewayMetrics
 from .middleware_metrics import GatewayMetricsMiddleware
 from .rate_limit import TenantRateLimiter
 from .schemas import (
+    AuditEventPublic,
+    AuditResponse,
+    AuthInfoResponse,
+    BudgetEventPublic,
     BudgetStatusResponse,
     ChatCompletionPayload,
     GatewayVersion,
     KeyCreateRequest,
     KeyCreateResponse,
     KeyPublic,
+    ProfilePublic,
     SeatCreateRequest,
     SeatPatchRequest,
     SeatPublic,
@@ -56,9 +65,17 @@ from .utils import TokenEstimator, configure_logging, extract_prompt_text, json_
 
 @dataclass
 class Settings:
+    config_path: str
     model_id: str
     db_path: str
+    admin_auth_mode: str
     admin_token: str | None
+    jwks_url: str | None
+    oidc_issuer: str | None
+    oidc_audience: str | None
+    role_claim: str
+    groups_claim: str
+    admin_group: str | None
     global_max_concurrent: int
     max_body_bytes: int
     upstream_url: str
@@ -75,46 +92,60 @@ class Settings:
     metrics_tenant_labels: bool
     gpu_metrics_poll_interval_seconds: float
     gpu_hourly_rate: float
+    metrics_enabled: bool
+    ui_enabled: bool
+    profiles_enabled: bool
+    profiles_path: str
+    ui_path: str
 
     @classmethod
     def from_env(cls) -> "Settings":
-        model_id = os.getenv("MODEL_ID")
-        if not model_id:
-            raise RuntimeError("MODEL_ID is required for gateway")
+        cfg = load_config()
 
         try:
             vllm_version = version("vllm")
         except PackageNotFoundError:
             vllm_version = "unknown"
 
-        metrics_tenant_labels = os.getenv("METRICS_TENANT_LABELS", "on").strip().lower()
-        if metrics_tenant_labels not in {"on", "off"}:
-            raise RuntimeError("METRICS_TENANT_LABELS must be one of: on, off")
-
-        gpu_hourly_rate = float(os.getenv("GPU_HOURLY_RATE", "0.0"))
-        if gpu_hourly_rate < 0:
-            raise RuntimeError("GPU_HOURLY_RATE must be >= 0")
+        def _clean_optional(value: str | None) -> str | None:
+            if value is None:
+                return None
+            text = value.strip()
+            return text or None
 
         return cls(
-            model_id=model_id,
-            db_path=os.getenv("DB_PATH", "/data/controlplane.db"),
-            admin_token=os.getenv("ADMIN_TOKEN"),
-            global_max_concurrent=int(os.getenv("GLOBAL_MAX_CONCURRENT", "128")),
-            max_body_bytes=int(os.getenv("MAX_BODY_BYTES", str(1024 * 1024))),
-            upstream_url=f"http://127.0.0.1:{os.getenv('VLLM_PORT', '8001')}",
-            upstream_timeout_seconds=float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "300")),
-            build_sha=os.getenv("BUILD_SHA", "dev"),
-            build_time=os.getenv("BUILD_TIME", "dev"),
+            config_path=str(cfg["CONFIG_PATH"]),
+            model_id=str(cfg["MODEL_ID"]),
+            db_path=str(cfg["DB_PATH"]),
+            admin_auth_mode=str(cfg["ADMIN_AUTH_MODE"]),
+            admin_token=_clean_optional(cfg.get("ADMIN_TOKEN")),
+            jwks_url=_clean_optional(cfg.get("JWKS_URL")),
+            oidc_issuer=_clean_optional(cfg.get("OIDC_ISSUER")),
+            oidc_audience=_clean_optional(cfg.get("OIDC_AUDIENCE")),
+            role_claim=str(cfg.get("ROLE_CLAIM") or "role"),
+            groups_claim=str(cfg.get("GROUPS_CLAIM") or "groups"),
+            admin_group=_clean_optional(cfg.get("ADMIN_GROUP")),
+            global_max_concurrent=int(cfg["GLOBAL_MAX_CONCURRENT"]),
+            max_body_bytes=int(cfg["MAX_BODY_BYTES"]),
+            upstream_url=f"http://127.0.0.1:{int(cfg['VLLM_PORT'])}",
+            upstream_timeout_seconds=float(cfg["UPSTREAM_TIMEOUT_SECONDS"]),
+            build_sha=str(cfg["BUILD_SHA"]),
+            build_time=str(cfg["BUILD_TIME"]),
             vllm_version=vllm_version,
-            default_max_concurrent=int(os.getenv("DEFAULT_MAX_CONCURRENT", "4")),
-            default_rpm_limit=int(os.getenv("DEFAULT_RPM_LIMIT", "120")),
-            default_tpm_limit=int(os.getenv("DEFAULT_TPM_LIMIT", "120000")),
-            default_max_context_tokens=int(os.getenv("DEFAULT_MAX_CONTEXT_TOKENS", "8192")),
-            default_max_output_tokens=int(os.getenv("DEFAULT_MAX_OUTPUT_TOKENS", "512")),
-            trust_remote_code=os.getenv("TRUST_REMOTE_CODE", "0").lower() in {"1", "true", "yes", "on"},
-            metrics_tenant_labels=metrics_tenant_labels == "on",
-            gpu_metrics_poll_interval_seconds=float(os.getenv("GPU_METRICS_POLL_INTERVAL_SECONDS", "2")),
-            gpu_hourly_rate=gpu_hourly_rate,
+            default_max_concurrent=int(cfg["DEFAULT_MAX_CONCURRENT"]),
+            default_rpm_limit=int(cfg["DEFAULT_RPM_LIMIT"]),
+            default_tpm_limit=int(cfg["DEFAULT_TPM_LIMIT"]),
+            default_max_context_tokens=int(cfg["DEFAULT_MAX_CONTEXT_TOKENS"]),
+            default_max_output_tokens=int(cfg["DEFAULT_MAX_OUTPUT_TOKENS"]),
+            trust_remote_code=bool(cfg["TRUST_REMOTE_CODE"]),
+            metrics_tenant_labels=str(cfg["METRICS_TENANT_LABELS"]) == "on",
+            gpu_metrics_poll_interval_seconds=float(cfg["GPU_METRICS_POLL_INTERVAL_SECONDS"]),
+            gpu_hourly_rate=float(cfg["GPU_HOURLY_RATE"]),
+            metrics_enabled=bool(cfg["METRICS_ENABLED"]),
+            ui_enabled=bool(cfg["UI_ENABLED"]),
+            profiles_enabled=bool(cfg["PROFILES_ENABLED"]),
+            profiles_path=str(cfg["PROFILES_PATH"]),
+            ui_path=str(cfg["UI_PATH"]),
         )
 
 
@@ -139,63 +170,6 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
         status_code=exc.status_code,
         content={"error": {"type": "http_error", "message": str(exc.detail)}},
     )
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    configure_logging()
-
-    settings = Settings.from_env()
-    db = Database(settings.db_path)
-    db.ensure_schema()
-
-    timeout = httpx.Timeout(settings.upstream_timeout_seconds, connect=5.0)
-    http_client = httpx.AsyncClient(timeout=timeout)
-
-    estimator = TokenEstimator(
-        model_id=settings.model_id,
-        hf_token=os.getenv("HF_TOKEN"),
-        trust_remote_code=settings.trust_remote_code,
-    )
-
-    metrics = GatewayMetrics(tenant_labels_enabled=settings.metrics_tenant_labels)
-    metrics.set_engine_healthy(False)
-
-    gpu_metrics_poller = GPUMetricsPoller(
-        metrics=metrics,
-        poll_interval_seconds=settings.gpu_metrics_poll_interval_seconds,
-    )
-    await gpu_metrics_poller.start()
-
-    app.state.settings = settings
-    app.state.db = db
-    app.state.http_client = http_client
-    app.state.rate_limiter = TenantRateLimiter()
-    app.state.concurrency = ConcurrencyManager(settings.global_max_concurrent)
-    app.state.estimator = estimator
-    app.state.metrics = metrics
-    app.state.gpu_metrics_poller = gpu_metrics_poller
-
-    json_log(
-        "gateway_started",
-        model_id=settings.model_id,
-        db_path=settings.db_path,
-        global_max_concurrent=settings.global_max_concurrent,
-        metrics_tenant_labels=settings.metrics_tenant_labels,
-        gpu_metrics_poll_interval_seconds=settings.gpu_metrics_poll_interval_seconds,
-        gpu_hourly_rate=settings.gpu_hourly_rate,
-    )
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    client: httpx.AsyncClient = app.state.http_client
-    db: Database = app.state.db
-    gpu_metrics_poller: GPUMetricsPoller = app.state.gpu_metrics_poller
-
-    await gpu_metrics_poller.stop()
-    await client.aclose()
-    db.close()
 
 
 def _effective_limits(settings: Settings, body: TenantCreateRequest) -> dict[str, int]:
@@ -242,9 +216,175 @@ def _estimate_gpu_and_cost(settings: Settings, latency_ms_value: int, status_cod
     return gpu_seconds_est, max(0.0, cost_est)
 
 
-async def _check_admin(x_admin_token: str | None) -> None:
-    settings: Settings = app.state.settings
-    verify_admin_token(settings.admin_token, x_admin_token)
+async def _check_admin(request: Request) -> AdminPrincipal:
+    provider: AdminAuthProvider = app.state.admin_auth
+    return provider.authenticate(request)
+
+
+def _audit(
+    *,
+    request: Request,
+    principal: AdminPrincipal,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    details: dict[str, Any] | None,
+) -> None:
+    db: Database = app.state.db
+    req_id = request_id_from_headers(request.headers)
+    log_audit_event(
+        db=db,
+        admin_identity=principal.identity,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        details=details,
+        request_id=req_id,
+    )
+
+
+def _resolve_profile_path(settings: Settings) -> Path:
+    return Path(settings.profiles_path).expanduser().resolve()
+
+
+def _load_profiles(settings: Settings) -> dict[str, dict[str, Any]]:
+    if not settings.profiles_enabled:
+        return {}
+
+    profile_dir = _resolve_profile_path(settings)
+    if not profile_dir.exists() or not profile_dir.is_dir():
+        json_log("profiles_dir_missing", profiles_path=str(profile_dir))
+        return {}
+
+    profiles: dict[str, dict[str, Any]] = {}
+    for path in sorted(profile_dir.glob("*.yaml")):
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("profile must be a mapping")
+
+            normalized = _normalize_profile_payload(path.stem, payload)
+            profile = ProfilePublic(**normalized)
+            profiles[profile.name] = profile.model_dump()
+        except Exception as exc:
+            json_log("profile_load_failed", file=str(path), message=str(exc))
+    return profiles
+
+
+def _normalize_profile_payload(fallback_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    normalized["name"] = str(payload.get("name") or fallback_name)
+
+    suggested_defaults = payload.get("suggested_defaults")
+    if suggested_defaults is None:
+        suggested_defaults = {}
+    if not isinstance(suggested_defaults, dict):
+        raise ValueError("suggested_defaults must be a mapping")
+
+    tenant_limits = suggested_defaults.get("tenant_limits") or suggested_defaults.get("default_tenant_limits")
+    if tenant_limits is None and isinstance(payload.get("default_tenant_limits"), dict):
+        tenant_limits = payload.get("default_tenant_limits")
+
+    merged_defaults: dict[str, Any] = {}
+    if isinstance(suggested_defaults.get("global_max_concurrent"), (int, float)):
+        merged_defaults["global_max_concurrent"] = int(suggested_defaults["global_max_concurrent"])
+    elif isinstance(payload.get("global_max_concurrent"), (int, float)):
+        merged_defaults["global_max_concurrent"] = int(payload["global_max_concurrent"])
+
+    if isinstance(suggested_defaults.get("gpu_hourly_rate"), (int, float)):
+        merged_defaults["gpu_hourly_rate"] = float(suggested_defaults["gpu_hourly_rate"])
+    elif isinstance(payload.get("gpu_hourly_rate"), (int, float)):
+        merged_defaults["gpu_hourly_rate"] = float(payload["gpu_hourly_rate"])
+
+    if isinstance(tenant_limits, dict):
+        merged_defaults["tenant_limits"] = tenant_limits
+
+    normalized["suggested_defaults"] = merged_defaults or None
+    return normalized
+
+
+def _profiles_or_404(settings: Settings) -> dict[str, dict[str, Any]]:
+    if not settings.profiles_enabled:
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "profiles disabled"}})
+    return app.state.profiles
+
+
+def _generate_runpod_snippet(settings: Settings, profile: dict[str, Any]) -> tuple[str, str, list[str]]:
+    suggested = profile.get("suggested_defaults") or {}
+    tenant_defaults = (suggested.get("tenant_limits") or {}) if isinstance(suggested, dict) else {}
+    gpu_hourly_rate = suggested.get("gpu_hourly_rate") if isinstance(suggested, dict) else None
+    if gpu_hourly_rate is None:
+        gpu_hourly_rate = settings.gpu_hourly_rate
+
+    run_lines = [
+        f"MODEL_ID={profile['model_id']}",
+        f"DTYPE={profile['dtype']}",
+        f"MAX_MODEL_LEN={profile['max_model_len']}",
+        f"TENSOR_PARALLEL={profile['tensor_parallel']}",
+        f"GPU_MEMORY_UTILIZATION={profile['gpu_memory_utilization']}",
+        f"GLOBAL_MAX_CONCURRENT={suggested.get('global_max_concurrent', settings.global_max_concurrent)}",
+        f"DEFAULT_MAX_CONCURRENT={tenant_defaults.get('max_concurrent', settings.default_max_concurrent)}",
+        f"DEFAULT_RPM_LIMIT={tenant_defaults.get('rpm_limit', settings.default_rpm_limit)}",
+        f"DEFAULT_TPM_LIMIT={tenant_defaults.get('tpm_limit', settings.default_tpm_limit)}",
+        f"DEFAULT_MAX_CONTEXT_TOKENS={tenant_defaults.get('max_context_tokens', settings.default_max_context_tokens)}",
+        f"DEFAULT_MAX_OUTPUT_TOKENS={tenant_defaults.get('max_output_tokens', settings.default_max_output_tokens)}",
+        f"ADMIN_AUTH_MODE={settings.admin_auth_mode}",
+        "ADMIN_TOKEN=<set-if-static-token-mode>",
+        f"DB_PATH={settings.db_path}",
+        f"GPU_HOURLY_RATE={gpu_hourly_rate}",
+    ]
+
+    if settings.admin_auth_mode == "oidc":
+        run_lines.extend(
+            [
+                "JWKS_URL=<your-jwks-url>",
+                "OIDC_ISSUER=<your-issuer>",
+                "OIDC_AUDIENCE=<your-audience>",
+                f"ROLE_CLAIM={settings.role_claim}",
+                f"GROUPS_CLAIM={settings.groups_claim}",
+                f"ADMIN_GROUP={settings.admin_group or '<your-admin-group>'}",
+            ]
+        )
+
+    if settings.admin_auth_mode == "static_token":
+        auth_header = "-H \"X-Admin-Token: ${ADMIN_TOKEN}\""
+    else:
+        auth_header = "-H \"Authorization: Bearer ${ADMIN_JWT}\""
+
+    bootstrap_lines = [
+        "BASE_URL=http://<gateway-host>:8000",
+        "# Step 1: create first tenant",
+        (
+            "curl -sS -X POST \"${BASE_URL}/admin/tenants\" "
+            f"{auth_header} "
+            "-H \"Content-Type: application/json\" "
+            "-d '{\"tenant_name\":\"demo-tenant\"}'"
+        ),
+        "# Save tenant_id from response as TENANT_ID",
+        "# Step 2: create a seat",
+        (
+            "curl -sS -X POST \"${BASE_URL}/admin/seats\" "
+            f"{auth_header} "
+            "-H \"Content-Type: application/json\" "
+            "-d '{\"tenant_id\":\"<TENANT_ID>\",\"seat_name\":\"demo-seat\",\"role\":\"user\"}'"
+        ),
+        "# Save seat_id from response as SEAT_ID",
+        "# Step 3: create seat-bound API key",
+        (
+            "curl -sS -X POST \"${BASE_URL}/admin/keys\" "
+            f"{auth_header} "
+            "-H \"Content-Type: application/json\" "
+            "-d '{\"tenant_id\":\"<TENANT_ID>\",\"seat_id\":\"<SEAT_ID>\"}'"
+        ),
+    ]
+
+    notes = [
+        "Profiles are packaging presets only; they do not provision GPUs.",
+        "Expose gateway port 8000 and persist /data + /cache volumes.",
+        "In static_token mode use ADMIN_TOKEN header; in oidc mode send Bearer JWT.",
+    ]
+
+    return "\n".join(run_lines), "\n".join(bootstrap_lines), notes
 
 
 async def _probe_upstream() -> bool:
@@ -413,6 +553,94 @@ def _budget_status_payload(db: Database, settings: Settings, tenant_id: str, req
     }
 
 
+def _resolve_ui_file(settings: Settings, asset_path: str | None = None) -> Path:
+    ui_root = Path(settings.ui_path).expanduser().resolve()
+    if asset_path is None or asset_path.strip() == "":
+        candidate = (ui_root / "index.html").resolve()
+    else:
+        candidate = (ui_root / asset_path).resolve()
+
+    if ui_root != candidate and ui_root not in candidate.parents:
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "asset not found"}})
+    return candidate
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    configure_logging()
+
+    settings = Settings.from_env()
+    db = Database(settings.db_path)
+    db.ensure_schema()
+
+    timeout = httpx.Timeout(settings.upstream_timeout_seconds, connect=5.0)
+    http_client = httpx.AsyncClient(timeout=timeout)
+
+    estimator = TokenEstimator(
+        model_id=settings.model_id,
+        hf_token=os.getenv("HF_TOKEN"),
+        trust_remote_code=settings.trust_remote_code,
+    )
+
+    metrics = GatewayMetrics(tenant_labels_enabled=settings.metrics_tenant_labels)
+    metrics.set_engine_healthy(False)
+
+    gpu_metrics_poller = GPUMetricsPoller(
+        metrics=metrics,
+        poll_interval_seconds=settings.gpu_metrics_poll_interval_seconds,
+    )
+    await gpu_metrics_poller.start()
+
+    admin_auth = AdminAuthProvider(
+        mode=settings.admin_auth_mode,
+        admin_token=settings.admin_token,
+        jwks_url=settings.jwks_url,
+        issuer=settings.oidc_issuer,
+        audience=settings.oidc_audience,
+        role_claim=settings.role_claim,
+        groups_claim=settings.groups_claim,
+        admin_group=settings.admin_group,
+    )
+
+    app.state.settings = settings
+    app.state.db = db
+    app.state.http_client = http_client
+    app.state.rate_limiter = TenantRateLimiter()
+    app.state.concurrency = ConcurrencyManager(settings.global_max_concurrent)
+    app.state.estimator = estimator
+    app.state.metrics = metrics
+    app.state.gpu_metrics_poller = gpu_metrics_poller
+    app.state.admin_auth = admin_auth
+    app.state.profiles = _load_profiles(settings)
+
+    json_log(
+        "gateway_started",
+        model_id=settings.model_id,
+        config_path=settings.config_path,
+        db_path=settings.db_path,
+        admin_auth_mode=settings.admin_auth_mode,
+        global_max_concurrent=settings.global_max_concurrent,
+        metrics_tenant_labels=settings.metrics_tenant_labels,
+        metrics_enabled=settings.metrics_enabled,
+        ui_enabled=settings.ui_enabled,
+        profiles_enabled=settings.profiles_enabled,
+        profiles_path=settings.profiles_path,
+        gpu_metrics_poll_interval_seconds=settings.gpu_metrics_poll_interval_seconds,
+        gpu_hourly_rate=settings.gpu_hourly_rate,
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    client: httpx.AsyncClient = app.state.http_client
+    db: Database = app.state.db
+    gpu_metrics_poller: GPUMetricsPoller = app.state.gpu_metrics_poller
+
+    await gpu_metrics_poller.stop()
+    await client.aclose()
+    db.close()
+
+
 @app.get("/livez")
 async def livez() -> dict[str, str]:
     return {"status": "alive"}
@@ -448,43 +676,62 @@ async def gateway_version() -> GatewayVersion:
         build_time=settings.build_time,
         model_id=settings.model_id,
         vllm_version=settings.vllm_version,
+        ui_enabled=settings.ui_enabled,
+        metrics_enabled=settings.metrics_enabled,
+        admin_auth_mode=settings.admin_auth_mode,
+        profiles_enabled=settings.profiles_enabled,
     )
 
 
+@app.get("/admin/auth_info", response_model=AuthInfoResponse)
+async def admin_auth_info() -> AuthInfoResponse:
+    provider: AdminAuthProvider = app.state.admin_auth
+    payload = provider.auth_info()
+    return AuthInfoResponse(**payload)
+
+
 @app.get("/metrics")
-async def metrics_endpoint(x_admin_token: str | None = Header(default=None)) -> Response:
+async def metrics_endpoint(request: Request) -> Response:
     settings: Settings = app.state.settings
     metrics: GatewayMetrics = app.state.metrics
 
-    if not settings.admin_token:
+    if not settings.metrics_enabled:
         return JSONResponse(
-            status_code=503,
-            content={
-                "error": {
-                    "type": "admin_unavailable",
-                    "message": "metrics unavailable: ADMIN_TOKEN is not configured",
-                }
-            },
+            status_code=404,
+            content={"error": {"type": "not_found", "message": "metrics endpoint is disabled"}},
         )
 
-    if not x_admin_token:
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"type": "unauthorized", "message": "missing X-Admin-Token header"}},
-        )
-
-    if not hmac.compare_digest(settings.admin_token, x_admin_token):
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"type": "unauthorized", "message": "invalid admin token"}},
-        )
-
+    await _check_admin(request)
     return metrics.response()
 
 
+@app.get("/ui")
+async def ui_index() -> Response:
+    settings: Settings = app.state.settings
+    if not settings.ui_enabled:
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "ui disabled"}})
+
+    target = _resolve_ui_file(settings)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "ui not found"}})
+    return FileResponse(target)
+
+
+@app.get("/ui/{asset_path:path}")
+async def ui_assets(asset_path: str) -> Response:
+    settings: Settings = app.state.settings
+    if not settings.ui_enabled:
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "ui disabled"}})
+
+    target = _resolve_ui_file(settings, asset_path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "asset not found"}})
+    return FileResponse(target)
+
+
 @app.post("/admin/tenants", response_model=TenantCreateResponse)
-async def create_tenant(body: TenantCreateRequest, x_admin_token: str | None = Header(default=None)) -> TenantCreateResponse:
-    await _check_admin(x_admin_token)
+async def create_tenant(body: TenantCreateRequest, request: Request) -> TenantCreateResponse:
+    principal = await _check_admin(request)
 
     settings: Settings = app.state.settings
     db: Database = app.state.db
@@ -521,12 +768,25 @@ async def create_tenant(body: TenantCreateRequest, x_admin_token: str | None = H
 
     await concurrency.set_tenant_limit(tenant_id, limits["max_concurrent"])
 
+    _audit(
+        request=request,
+        principal=principal,
+        action="tenant_create",
+        resource_type="tenant",
+        resource_id=tenant_id,
+        details={
+            "tenant_id": tenant_id,
+            "tenant_name": body.tenant_name,
+            "limits": limits,
+        },
+    )
+
     return TenantCreateResponse(**tenant, api_key=api_key)
 
 
 @app.get("/admin/tenants")
-async def list_tenants(x_admin_token: str | None = Header(default=None)) -> dict[str, list[TenantPublic]]:
-    await _check_admin(x_admin_token)
+async def list_tenants(request: Request) -> dict[str, list[TenantPublic]]:
+    await _check_admin(request)
 
     db: Database = app.state.db
     tenants = [TenantPublic(**row) for row in db.list_tenants()]
@@ -537,9 +797,9 @@ async def list_tenants(x_admin_token: str | None = Header(default=None)) -> dict
 async def patch_tenant(
     tenant_id: str,
     body: TenantPatchRequest,
-    x_admin_token: str | None = Header(default=None),
+    request: Request,
 ) -> TenantPublic:
-    await _check_admin(x_admin_token)
+    principal = await _check_admin(request)
 
     db: Database = app.state.db
     concurrency: ConcurrencyManager = app.state.concurrency
@@ -560,12 +820,21 @@ async def patch_tenant(
     if "max_concurrent" in updates:
         await concurrency.set_tenant_limit(tenant_id, int(tenant["max_concurrent"]))
 
+    _audit(
+        request=request,
+        principal=principal,
+        action="tenant_update_limits",
+        resource_type="tenant",
+        resource_id=tenant_id,
+        details={"tenant_id": tenant_id, "updates": updates},
+    )
+
     return TenantPublic(**tenant)
 
 
 @app.post("/admin/seats", response_model=SeatPublic)
-async def create_seat(body: SeatCreateRequest, x_admin_token: str | None = Header(default=None)) -> SeatPublic:
-    await _check_admin(x_admin_token)
+async def create_seat(body: SeatCreateRequest, request: Request) -> SeatPublic:
+    principal = await _check_admin(request)
 
     db: Database = app.state.db
     if db.get_tenant(body.tenant_id) is None:
@@ -584,15 +853,29 @@ async def create_seat(body: SeatCreateRequest, x_admin_token: str | None = Heade
             detail={"error": {"type": "conflict", "message": f"seat creation conflict: {exc}"}},
         ) from exc
 
+    _audit(
+        request=request,
+        principal=principal,
+        action="seat_create",
+        resource_type="seat",
+        resource_id=seat["seat_id"],
+        details={
+            "tenant_id": body.tenant_id,
+            "seat_id": seat["seat_id"],
+            "seat_name": body.seat_name,
+            "role": body.role,
+        },
+    )
+
     return SeatPublic(**seat)
 
 
 @app.get("/admin/seats")
 async def list_seats(
+    request: Request,
     tenant_id: str | None = Query(default=None),
-    x_admin_token: str | None = Header(default=None),
 ) -> dict[str, list[SeatPublic]]:
-    await _check_admin(x_admin_token)
+    await _check_admin(request)
 
     db: Database = app.state.db
     seats = [SeatPublic(**row) for row in db.list_seats(tenant_id=tenant_id)]
@@ -603,9 +886,9 @@ async def list_seats(
 async def patch_seat(
     seat_id: str,
     body: SeatPatchRequest,
-    x_admin_token: str | None = Header(default=None),
+    request: Request,
 ) -> SeatPublic:
-    await _check_admin(x_admin_token)
+    principal = await _check_admin(request)
 
     db: Database = app.state.db
     updates = body.model_dump(exclude_none=True)
@@ -621,12 +904,25 @@ async def patch_seat(
     if seat is None:
         raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "seat not found"}})
 
+    action = "seat_update"
+    if "is_active" in updates:
+        action = "seat_activated" if bool(updates["is_active"]) else "seat_deactivated"
+
+    _audit(
+        request=request,
+        principal=principal,
+        action=action,
+        resource_type="seat",
+        resource_id=seat_id,
+        details={"tenant_id": seat["tenant_id"], "seat_id": seat_id, "updates": updates},
+    )
+
     return SeatPublic(**seat)
 
 
 @app.post("/admin/keys", response_model=KeyCreateResponse)
-async def create_key(body: KeyCreateRequest, x_admin_token: str | None = Header(default=None)) -> KeyCreateResponse:
-    await _check_admin(x_admin_token)
+async def create_key(body: KeyCreateRequest, request: Request) -> KeyCreateResponse:
+    principal = await _check_admin(request)
 
     db: Database = app.state.db
     tenant = db.get_tenant(body.tenant_id)
@@ -655,6 +951,15 @@ async def create_key(body: KeyCreateRequest, x_admin_token: str | None = Header(
             detail={"error": {"type": "conflict", "message": f"key creation conflict: {exc}"}},
         ) from exc
 
+    _audit(
+        request=request,
+        principal=principal,
+        action="key_create",
+        resource_type="key",
+        resource_id=key_id,
+        details={"tenant_id": body.tenant_id, "seat_id": body.seat_id, "key_id": key_id},
+    )
+
     return KeyCreateResponse(
         key_id=key_row["key_id"],
         tenant_id=key_row["tenant_id"],
@@ -666,10 +971,10 @@ async def create_key(body: KeyCreateRequest, x_admin_token: str | None = Header(
 
 @app.get("/admin/keys")
 async def list_keys(
+    request: Request,
     tenant_id: str | None = Query(default=None),
-    x_admin_token: str | None = Header(default=None),
 ) -> dict[str, list[KeyPublic]]:
-    await _check_admin(x_admin_token)
+    await _check_admin(request)
 
     db: Database = app.state.db
     keys = [KeyPublic(**row) for row in db.list_api_keys(tenant_id=tenant_id)]
@@ -677,22 +982,32 @@ async def list_keys(
 
 
 @app.post("/admin/keys/{key_id}/revoke", response_model=KeyPublic)
-async def revoke_key(key_id: str, x_admin_token: str | None = Header(default=None)) -> KeyPublic:
-    await _check_admin(x_admin_token)
+async def revoke_key(key_id: str, request: Request) -> KeyPublic:
+    principal = await _check_admin(request)
 
     db: Database = app.state.db
     key_row = db.revoke_api_key(key_id)
     if key_row is None:
         raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "key not found"}})
+
+    _audit(
+        request=request,
+        principal=principal,
+        action="key_revoke",
+        resource_type="key",
+        resource_id=key_id,
+        details={"tenant_id": key_row["tenant_id"], "key_id": key_id},
+    )
+
     return KeyPublic(**key_row)
 
 
 @app.get("/admin/usage", response_model=UsageResponse)
 async def tenant_usage(
+    request: Request,
     window: str = "24h",
-    x_admin_token: str | None = Header(default=None),
 ) -> UsageResponse:
-    await _check_admin(x_admin_token)
+    await _check_admin(request)
 
     db: Database = app.state.db
     try:
@@ -706,10 +1021,10 @@ async def tenant_usage(
 
 @app.get("/admin/usage/tenants", response_model=UsageTenantsResponse)
 async def tenant_usage_rollup(
+    request: Request,
     window: str = "24h",
-    x_admin_token: str | None = Header(default=None),
 ) -> UsageTenantsResponse:
-    await _check_admin(x_admin_token)
+    await _check_admin(request)
 
     settings: Settings = app.state.settings
     db: Database = app.state.db
@@ -728,11 +1043,11 @@ async def tenant_usage_rollup(
 
 @app.get("/admin/usage/seats", response_model=UsageSeatsResponse)
 async def seat_usage_rollup(
+    request: Request,
     tenant_id: str,
     window: str = "24h",
-    x_admin_token: str | None = Header(default=None),
 ) -> UsageSeatsResponse:
-    await _check_admin(x_admin_token)
+    await _check_admin(request)
 
     settings: Settings = app.state.settings
     db: Database = app.state.db
@@ -758,9 +1073,9 @@ async def seat_usage_rollup(
 async def put_budget(
     tenant_id: str,
     body: TenantBudgetPutRequest,
-    x_admin_token: str | None = Header(default=None),
+    request: Request,
 ) -> TenantBudgetPublic:
-    await _check_admin(x_admin_token)
+    principal = await _check_admin(request)
 
     db: Database = app.state.db
     if db.get_tenant(tenant_id) is None:
@@ -771,16 +1086,27 @@ async def put_budget(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": {"type": "bad_input", "message": str(exc)}}) from exc
 
+    existing_budget = db.get_tenant_budget(tenant_id)
     budget = db.upsert_tenant_budget(tenant_id=tenant_id, window=body.window, budget_usd=body.budget_usd)
+
+    _audit(
+        request=request,
+        principal=principal,
+        action="budget_update" if existing_budget else "budget_set",
+        resource_type="budget",
+        resource_id=tenant_id,
+        details={"tenant_id": tenant_id, "window": body.window, "budget_usd": body.budget_usd},
+    )
+
     return TenantBudgetPublic(**budget)
 
 
 @app.get("/admin/budgets")
 async def list_budgets(
+    request: Request,
     tenant_id: str | None = Query(default=None),
-    x_admin_token: str | None = Header(default=None),
 ) -> dict[str, list[TenantBudgetPublic]]:
-    await _check_admin(x_admin_token)
+    await _check_admin(request)
 
     db: Database = app.state.db
     budgets = [TenantBudgetPublic(**row) for row in db.list_tenant_budgets(tenant_id=tenant_id)]
@@ -789,11 +1115,11 @@ async def list_budgets(
 
 @app.get("/admin/budget_status", response_model=BudgetStatusResponse)
 async def budget_status(
+    request: Request,
     tenant_id: str,
     window: str | None = Query(default=None),
-    x_admin_token: str | None = Header(default=None),
 ) -> BudgetStatusResponse:
-    await _check_admin(x_admin_token)
+    await _check_admin(request)
 
     db: Database = app.state.db
     settings: Settings = app.state.settings
@@ -809,8 +1135,107 @@ async def budget_status(
     return BudgetStatusResponse(**payload)
 
 
+@app.get("/admin/budget_events")
+async def budget_events(
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    window: str | None = Query(default=None),
+) -> dict[str, list[BudgetEventPublic]]:
+    await _check_admin(request)
+
+    db: Database = app.state.db
+    if window is not None:
+        try:
+            parse_budget_window(window)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": {"type": "bad_input", "message": str(exc)}}) from exc
+
+    rows = db.list_budget_events(tenant_id=tenant_id, window=window)
+    return {"data": [BudgetEventPublic(**row) for row in rows]}
+
+
+@app.get("/admin/audit", response_model=AuditResponse)
+async def admin_audit(
+    request: Request,
+    window: str = "24h",
+    tenant_id: str | None = Query(default=None),
+) -> AuditResponse:
+    await _check_admin(request)
+
+    db: Database = app.state.db
+    try:
+        window_seconds = parse_window(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"type": "bad_input", "message": str(exc)}}) from exc
+
+    threshold = to_iso(utc_now() - timedelta(seconds=window_seconds))
+    rows = db.list_audit_events(threshold_ts=threshold, tenant_id=tenant_id)
+    return AuditResponse(window=window, data=[AuditEventPublic(**row) for row in rows])
+
+
+@app.get("/admin/profiles")
+async def list_profiles(request: Request) -> dict[str, list[ProfilePublic]]:
+    await _check_admin(request)
+    settings: Settings = app.state.settings
+    profiles = _profiles_or_404(settings)
+    data = [ProfilePublic(**profiles[name]) for name in sorted(profiles)]
+    return {"data": data}
+
+
+@app.get("/admin/profiles/{name}", response_model=ProfilePublic)
+async def get_profile(name: str, request: Request) -> ProfilePublic:
+    principal = await _check_admin(request)
+    settings: Settings = app.state.settings
+    profiles = _profiles_or_404(settings)
+
+    profile = profiles.get(name)
+    if profile is None:
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "profile not found"}})
+
+    _audit(
+        request=request,
+        principal=principal,
+        action="profile_viewed",
+        resource_type="profile",
+        resource_id=name,
+        details={"profile_name": name},
+    )
+
+    return ProfilePublic(**profile)
+
+
+@app.post("/admin/profiles/{name}/generate_runpod")
+async def generate_profile_runpod(name: str, request: Request) -> dict[str, Any]:
+    principal = await _check_admin(request)
+    settings: Settings = app.state.settings
+    profiles = _profiles_or_404(settings)
+
+    profile = profiles.get(name)
+    if profile is None:
+        raise HTTPException(status_code=404, detail={"error": {"type": "not_found", "message": "profile not found"}})
+
+    run_snippet, bootstrap_snippet, notes = _generate_runpod_snippet(settings, profile)
+
+    _audit(
+        request=request,
+        principal=principal,
+        action="profile_generated",
+        resource_type="profile",
+        resource_id=name,
+        details={"profile_name": name, "target": "runpod"},
+    )
+
+    return {
+        "profile": ProfilePublic(**profile),
+        "admin_auth_mode": settings.admin_auth_mode,
+        "runpod_env_snippet": run_snippet,
+        "bootstrap_snippet": bootstrap_snippet,
+        "notes": notes,
+    }
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request, authorization: str | None = Header(default=None)) -> Response:
+async def chat_completions(request: Request) -> Response:
     settings: Settings = app.state.settings
     db: Database = app.state.db
     client: httpx.AsyncClient = app.state.http_client
@@ -824,7 +1249,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
 
     try:
-        api_key = parse_bearer_token(authorization)
+        api_key = parse_bearer_token(request.headers.get("authorization"))
     except HTTPException as exc:
         metrics.inc_rejection(reason="auth", tenant_id=None, tenant_name=None)
         return error_response(exc.status_code, "unauthorized", exc.detail["error"]["message"], request_id=request_id)

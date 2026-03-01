@@ -1,0 +1,15 @@
+name: balanced
+model_id: Qwen/Qwen2.5-7B-Instruct
+dtype: bfloat16
+max_model_len: 8192
+tensor_parallel: 1
+gpu_memory_utilization: 0.9
+suggested_defaults:
+  global_max_concurrent: 96
+  tenant_limits:
+    max_concurrent: 4
+    rpm_limit: 300
+    tpm_limit: 220000
+    max_context_tokens: 8192
+    max_output_tokens: 1024
+  gpu_hourly_rate: 1.8

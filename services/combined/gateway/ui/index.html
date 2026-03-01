@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Control Plane UI</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape one"></div>
+    <div class="bg-shape two"></div>
+
+    <main class="layout">
+      <section id="connect-screen" class="card connect-card">
+        <h1>Connect To Deployment</h1>
+        <p class="subtle">Target an already-running gateway deployment and authenticate as admin.</p>
+
+        <form id="connect-form">
+          <label>
+            Target Base URL
+            <input id="base-url" type="text" placeholder="https://your-gateway" required />
+          </label>
+
+          <div class="auth-mode-box">
+            <div class="auth-mode-head">
+              <span>Detected Auth Mode</span>
+              <button id="detect-auth" class="button button-ghost" type="button">Detect</button>
+            </div>
+            <div id="auth-mode-readout">Unknown</div>
+            <div id="auth-mode-requirements" class="subtle small"></div>
+          </div>
+
+          <label id="admin-token-row" class="hidden">
+            Admin Token
+            <input id="admin-token" type="password" placeholder="X-Admin-Token" />
+          </label>
+
+          <label id="admin-jwt-row" class="hidden">
+            Admin JWT
+            <textarea id="admin-jwt" rows="4" placeholder="Paste Bearer JWT"></textarea>
+          </label>
+
+          <label>
+            Grafana URL (optional)
+            <input id="grafana-url" type="text" placeholder="https://grafana.example.com" />
+          </label>
+
+          <div class="row gap">
+            <button class="button" type="submit">Connect</button>
+          </div>
+          <p id="connect-error" class="error"></p>
+        </form>
+      </section>
+
+      <section id="app-shell" class="hidden">
+        <header class="app-header card">
+          <div>
+            <h2>Enterprise Control Plane</h2>
+            <p id="connection-badge" class="subtle"></p>
+          </div>
+          <div class="row gap">
+            <button id="open-grafana" class="button button-ghost" type="button">Open Grafana</button>
+            <button id="disconnect" class="button button-danger" type="button">Disconnect</button>
+          </div>
+        </header>
+
+        <nav class="tabs card" id="tabs">
+          <button class="tab active" data-tab="overview">Overview</button>
+          <button class="tab" data-tab="tenants">Tenants</button>
+          <button class="tab" data-tab="seats">Seats</button>
+          <button class="tab" data-tab="keys">Keys</button>
+          <button class="tab" data-tab="budgets">Budgets</button>
+          <button class="tab" data-tab="usage">Usage</button>
+          <button class="tab" data-tab="quick-test">Quick Test</button>
+          <button class="tab" data-tab="profiles">Profiles</button>
+        </nav>
+
+        <section id="tab-overview" class="tab-panel card">
+          <h3>Overview</h3>
+          <div class="kpi-grid" id="overview-kpis"></div>
+          <pre id="overview-health" class="mono-box"></pre>
+        </section>
+
+        <section id="tab-tenants" class="tab-panel card hidden">
+          <h3>Tenants</h3>
+
+          <div class="two-col">
+            <div>
+              <h4>Create Tenant</h4>
+              <form id="tenant-create-form" class="form-grid">
+                <label>Tenant Name<input id="tenant-create-name" type="text" required /></label>
+                <label>Max Concurrent<input id="tenant-create-max-concurrent" type="number" min="1" /></label>
+                <label>RPM Limit<input id="tenant-create-rpm" type="number" min="1" /></label>
+                <label>TPM Limit<input id="tenant-create-tpm" type="number" min="1" /></label>
+                <label>Max Context Tokens<input id="tenant-create-context" type="number" min="1" /></label>
+                <label>Max Output Tokens<input id="tenant-create-output" type="number" min="1" /></label>
+                <button class="button" type="submit">Create Tenant</button>
+              </form>
+            </div>
+
+            <div>
+              <h4>Edit Tenant Limits</h4>
+              <form id="tenant-edit-form" class="form-grid">
+                <label>Tenant<select id="tenant-edit-id"></select></label>
+                <label>Preset
+                  <select id="tenant-preset">
+                    <option value="">custom</option>
+                    <option value="conservative">conservative</option>
+                    <option value="standard">standard</option>
+                    <option value="pro">pro</option>
+                  </select>
+                </label>
+                <label>Max Concurrent<input id="tenant-edit-max-concurrent" type="number" min="1" /></label>
+                <label>RPM Limit<input id="tenant-edit-rpm" type="number" min="1" /></label>
+                <label>TPM Limit<input id="tenant-edit-tpm" type="number" min="1" /></label>
+                <label>Max Context Tokens<input id="tenant-edit-context" type="number" min="1" /></label>
+                <label>Max Output Tokens<input id="tenant-edit-output" type="number" min="1" /></label>
+                <label>Active
+                  <select id="tenant-edit-active">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </label>
+                <div class="row gap">
+                  <button id="tenant-preset-apply" class="button button-ghost" type="button">Apply To Form</button>
+                  <button id="tenant-preset-save" class="button" type="button">Apply + Save</button>
+                  <button class="button button-ghost" type="submit">Save Limits</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <h4>Tenant Usage Summary</h4>
+          <div class="row gap">
+            <label>Window
+              <select id="tenant-summary-window">
+                <option value="1h">1h</option>
+                <option value="24h" selected>24h</option>
+                <option value="7d">7d</option>
+              </select>
+            </label>
+            <button id="tenant-summary-refresh" class="button button-ghost" type="button">Refresh</button>
+          </div>
+          <div class="table-wrap"><table id="tenant-summary-table"></table></div>
+        </section>
+
+        <section id="tab-seats" class="tab-panel card hidden">
+          <h3>Seats</h3>
+          <div class="row gap">
+            <label>Tenant<select id="seats-tenant"></select></label>
+            <label>Seat Name<input id="seat-create-name" type="text" /></label>
+            <label>Role
+              <select id="seat-create-role">
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+                <option value="service">service</option>
+              </select>
+            </label>
+            <button id="seat-create-btn" class="button" type="button">Create Seat</button>
+          </div>
+          <div class="table-wrap"><table id="seats-table"></table></div>
+        </section>
+
+        <section id="tab-keys" class="tab-panel card hidden">
+          <h3>Keys</h3>
+          <div class="row gap">
+            <label>Tenant<select id="keys-tenant"></select></label>
+            <label>Seat<select id="keys-seat"></select></label>
+            <button id="key-create-btn" class="button" type="button">Create Key</button>
+          </div>
+          <div class="table-wrap"><table id="keys-table"></table></div>
+        </section>
+
+        <section id="tab-budgets" class="tab-panel card hidden">
+          <h3>Budgets</h3>
+          <div class="row gap">
+            <label>Tenant<select id="budget-tenant"></select></label>
+            <label>Window
+              <select id="budget-window">
+                <option value="day">day</option>
+                <option value="week">week</option>
+                <option value="month">month</option>
+              </select>
+            </label>
+            <label>Budget USD<input id="budget-usd" type="number" min="0.01" step="0.01" /></label>
+            <button id="budget-save" class="button" type="button">Save Budget</button>
+            <button id="budget-refresh" class="button button-ghost" type="button">Refresh Status</button>
+          </div>
+          <pre id="budget-status" class="mono-box"></pre>
+          <h4>Recent Budget Events</h4>
+          <div class="table-wrap"><table id="budget-events-table"></table></div>
+        </section>
+
+        <section id="tab-usage" class="tab-panel card hidden">
+          <h3>Usage</h3>
+          <div class="row gap">
+            <label>Window
+              <select id="usage-window">
+                <option value="1h">1h</option>
+                <option value="24h" selected>24h</option>
+                <option value="7d">7d</option>
+              </select>
+            </label>
+            <button id="usage-refresh" class="button" type="button">Refresh</button>
+          </div>
+          <h4>Per Tenant</h4>
+          <div class="table-wrap"><table id="usage-tenants-table"></table></div>
+          <h4>Per Seat</h4>
+          <div class="row gap">
+            <label>Tenant<select id="usage-seat-tenant"></select></label>
+            <button id="usage-seat-refresh" class="button button-ghost" type="button">Refresh Seats</button>
+          </div>
+          <div class="table-wrap"><table id="usage-seats-table"></table></div>
+        </section>
+
+        <section id="tab-quick-test" class="tab-panel card hidden">
+          <h3>Quick Inference Test</h3>
+          <div class="form-grid">
+            <label>Tenant API Key
+              <input id="quick-key" type="password" placeholder="cp_..." />
+            </label>
+            <label>Max Tokens
+              <input id="quick-max-tokens" type="number" value="64" min="1" />
+            </label>
+          </div>
+          <label>Prompt<textarea id="quick-prompt" rows="5">Say hello in one short sentence.</textarea></label>
+          <div class="row gap">
+            <button id="quick-run" class="button" type="button">Run Test</button>
+            <button id="quick-use-recent" class="button button-ghost" type="button">Use Recent Key</button>
+          </div>
+          <pre id="quick-result" class="mono-box"></pre>
+        </section>
+
+        <section id="tab-profiles" class="tab-panel card hidden">
+          <h3>Blueprint Presets</h3>
+          <div class="two-col">
+            <div>
+              <h4>Profiles</h4>
+              <div id="profiles-list" class="stack"></div>
+            </div>
+            <div>
+              <h4>Profile Details</h4>
+              <pre id="profile-details" class="mono-box"></pre>
+              <button id="profile-generate" class="button" type="button">Generate Runpod Snippets</button>
+              <h4>Runpod Env Snippet</h4>
+              <textarea id="profile-runpod" rows="12" readonly></textarea>
+              <button id="copy-runpod" class="button button-ghost" type="button">Copy Runpod Snippet</button>
+              <h4>Bootstrap Snippet</h4>
+              <textarea id="profile-bootstrap" rows="12" readonly></textarea>
+              <button id="copy-bootstrap" class="button button-ghost" type="button">Copy Bootstrap Snippet</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="key-modal">
+      <h4>New Key Created</h4>
+      <p>This key is shown once. Store it securely.</p>
+      <textarea id="key-modal-value" rows="4" readonly></textarea>
+      <div class="row gap">
+        <button id="key-modal-copy" class="button" type="button">Copy Key</button>
+        <button id="key-modal-use" class="button button-ghost" type="button">Use In Quick Test</button>
+        <button id="key-modal-close" class="button button-danger" type="button">Close</button>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

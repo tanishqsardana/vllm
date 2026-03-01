@@ -12,6 +12,8 @@ ARG HUGGINGFACE_HUB_VERSION=0.26.5
 ARG TQDM_VERSION=4.66.5
 ARG PROMETHEUS_CLIENT_VERSION=0.21.1
 ARG PYNVML_VERSION=11.5.3
+ARG PYYAML_VERSION=6.0.3
+ARG PYJWT_VERSION=2.10.1
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -50,7 +52,9 @@ RUN python -m pip install \
     "huggingface_hub==${HUGGINGFACE_HUB_VERSION}" \
     "tqdm==${TQDM_VERSION}" \
     "prometheus_client==${PROMETHEUS_CLIENT_VERSION}" \
-    "pynvml==${PYNVML_VERSION}"
+    "pynvml==${PYNVML_VERSION}" \
+    "pyyaml==${PYYAML_VERSION}" \
+    "PyJWT==${PYJWT_VERSION}"
 
 RUN useradd --create-home --uid 10001 --shell /bin/bash appuser \
     && mkdir -p /app /cache /data \
@@ -59,6 +63,8 @@ RUN useradd --create-home --uid 10001 --shell /bin/bash appuser \
 WORKDIR /app
 COPY services/combined/entrypoint.sh /app/entrypoint.sh
 COPY services/combined/gateway /app/gateway
+COPY config /app/config
+COPY profiles /app/profiles
 RUN chmod +x /app/entrypoint.sh
 
 USER appuser

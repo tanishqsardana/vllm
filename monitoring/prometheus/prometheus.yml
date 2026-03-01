@@ -10,7 +10,7 @@ scrape_configs:
     static_configs:
       # Replace with your Runpod proxy host (without https:// prefix)
       # Example: ju1rjbr1b0j4jh-8000.proxy.runpod.net
-      - targets: ["ch31hhvu0wv0se-8000.proxy.runpod.net"]
+      - targets: ["qa85lroqanzkz6-8000.proxy.runpod.net"]
     # Requires Prometheus >= 2.55
     http_headers:
       X-Admin-Token:

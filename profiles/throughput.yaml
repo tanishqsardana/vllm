@@ -1,0 +1,15 @@
+name: throughput
+model_id: Qwen/Qwen2.5-7B-Instruct
+dtype: float16
+max_model_len: 4096
+tensor_parallel: 2
+gpu_memory_utilization: 0.95
+suggested_defaults:
+  global_max_concurrent: 220
+  tenant_limits:
+    max_concurrent: 8
+    rpm_limit: 1200
+    tpm_limit: 700000
+    max_context_tokens: 4096
+    max_output_tokens: 512
+  gpu_hourly_rate: 2.2

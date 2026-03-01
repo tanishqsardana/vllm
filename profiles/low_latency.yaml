@@ -1,0 +1,15 @@
+name: low_latency
+model_id: Qwen/Qwen2.5-3B-Instruct
+dtype: bfloat16
+max_model_len: 4096
+tensor_parallel: 1
+gpu_memory_utilization: 0.82
+suggested_defaults:
+  global_max_concurrent: 48
+  tenant_limits:
+    max_concurrent: 2
+    rpm_limit: 180
+    tpm_limit: 90000
+    max_context_tokens: 4096
+    max_output_tokens: 256
+  gpu_hourly_rate: 1.2

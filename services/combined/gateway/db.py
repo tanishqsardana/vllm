@@ -110,6 +110,17 @@ class Database:
                     FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    event_id TEXT PRIMARY KEY,
+                    ts TEXT NOT NULL,
+                    admin_identity TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    details_json TEXT NOT NULL,
+                    request_id TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_requests_tenant_ts ON requests (tenant_id, ts_start);
                 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests (ts_start);
                 CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys (tenant_id);
@@ -118,6 +129,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_api_keys_revoked ON api_keys (revoked_at);
                 CREATE INDEX IF NOT EXISTS idx_seats_tenant ON seats (tenant_id);
                 CREATE INDEX IF NOT EXISTS idx_budget_events_window ON budget_events (tenant_id, window, window_start);
+                CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events (ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_audit_events_resource ON audit_events (resource_type, resource_id);
                 """
             )
 
@@ -822,49 +835,147 @@ class Database:
 
     def list_budget_events(
         self,
-        tenant_id: str,
+        tenant_id: str | None = None,
         window: str | None = None,
         window_start: str | None = None,
     ) -> list[dict[str, Any]]:
         with self._lock:
-            if window is None and window_start is None:
+            if tenant_id is None and window is None and window_start is None:
+                rows = self._conn.execute(
+                    """
+                    SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
+                    FROM budget_events
+                    ORDER BY created_at DESC
+                    """
+                ).fetchall()
+            elif tenant_id is not None and window is None and window_start is None:
                 rows = self._conn.execute(
                     """
                     SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
                     FROM budget_events
                     WHERE tenant_id = ?
-                    ORDER BY created_at ASC
+                    ORDER BY created_at DESC
                     """,
                     (tenant_id,),
+                ).fetchall()
+            elif tenant_id is not None and window is not None and window_start is not None:
+                rows = self._conn.execute(
+                    """
+                    SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
+                    FROM budget_events
+                    WHERE tenant_id = ? AND window = ? AND window_start = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (tenant_id, window, window_start),
+                ).fetchall()
+            elif tenant_id is not None and window is not None:
+                rows = self._conn.execute(
+                    """
+                    SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
+                    FROM budget_events
+                    WHERE tenant_id = ? AND window = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (tenant_id, window),
+                ).fetchall()
+            elif tenant_id is not None:
+                rows = self._conn.execute(
+                    """
+                    SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
+                    FROM budget_events
+                    WHERE tenant_id = ? AND window_start = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (tenant_id, window_start),
                 ).fetchall()
             elif window is not None and window_start is not None:
                 rows = self._conn.execute(
                     """
                     SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
                     FROM budget_events
-                    WHERE tenant_id = ? AND window = ? AND window_start = ?
-                    ORDER BY created_at ASC
+                    WHERE window = ? AND window_start = ?
+                    ORDER BY created_at DESC
                     """,
-                    (tenant_id, window, window_start),
+                    (window, window_start),
                 ).fetchall()
             elif window is not None:
                 rows = self._conn.execute(
                     """
                     SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
                     FROM budget_events
-                    WHERE tenant_id = ? AND window = ?
-                    ORDER BY created_at ASC
+                    WHERE window = ?
+                    ORDER BY created_at DESC
                     """,
-                    (tenant_id, window),
+                    (window,),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
                     """
                     SELECT event_id, tenant_id, window, window_start, threshold, cost_usd, budget_usd, created_at
                     FROM budget_events
-                    WHERE tenant_id = ? AND window_start = ?
-                    ORDER BY created_at ASC
+                    WHERE window_start = ?
+                    ORDER BY created_at DESC
                     """,
-                    (tenant_id, window_start),
+                    (window_start,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def insert_audit_event(
+        self,
+        event_id: str,
+        ts: str,
+        admin_identity: str,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        details_json: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO audit_events (
+                    event_id, ts, admin_identity, action, resource_type, resource_id, details_json, request_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, ts, admin_identity, action, resource_type, resource_id, details_json, request_id),
+            )
+            self._conn.commit()
+        return {
+            "event_id": event_id,
+            "ts": ts,
+            "admin_identity": admin_identity,
+            "action": action,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "details_json": details_json,
+            "request_id": request_id,
+        }
+
+    def list_audit_events(self, threshold_ts: str, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if tenant_id is None:
+                rows = self._conn.execute(
+                    """
+                    SELECT event_id, ts, admin_identity, action, resource_type, resource_id, details_json, request_id
+                    FROM audit_events
+                    WHERE ts >= ?
+                    ORDER BY ts DESC
+                    """,
+                    (threshold_ts,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT event_id, ts, admin_identity, action, resource_type, resource_id, details_json, request_id
+                    FROM audit_events
+                    WHERE ts >= ?
+                      AND (
+                        resource_id = ?
+                        OR details_json LIKE ?
+                      )
+                    ORDER BY ts DESC
+                    """,
+                    (threshold_ts, tenant_id, f'%\"tenant_id\":\"{tenant_id}\"%'),
                 ).fetchall()
         return [dict(row) for row in rows]
