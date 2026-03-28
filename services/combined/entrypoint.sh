@@ -9,26 +9,26 @@ fi
 
 GATEWAY_HOST="${GATEWAY_HOST:-0.0.0.0}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
-VLLM_HOST="127.0.0.1"
-VLLM_PORT="${VLLM_PORT:-8001}"
+DYNAMO_FRONTEND_PORT="${DYNAMO_FRONTEND_PORT:-8001}"
 
 DTYPE="${DTYPE:-bfloat16}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
-EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
+DYNAMO_EXTRA_VLLM_ARGS="${DYNAMO_EXTRA_VLLM_ARGS:-}"
 
-VLLM_READY_TIMEOUT_SECONDS="${VLLM_READY_TIMEOUT_SECONDS:-600}"
-VLLM_READY_POLL_SECONDS="${VLLM_READY_POLL_SECONDS:-2}"
+DYNAMO_READY_TIMEOUT_SECONDS="${DYNAMO_READY_TIMEOUT_SECONDS:-600}"
+DYNAMO_READY_POLL_SECONDS="${DYNAMO_READY_POLL_SECONDS:-2}"
 
 export HF_HOME="${HF_HOME:-/cache/huggingface}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
 export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-/cache/vllm}"
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+export DYN_FILE_KV="${DYN_FILE_KV:-/data/dynamo_kv}"
 
-mkdir -p "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}" "${VLLM_CACHE_ROOT}" /data
+mkdir -p "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}" "${VLLM_CACHE_ROOT}" /data "${DYN_FILE_KV}"
 
 if [[ -n "${HF_TOKEN:-}" ]]; then
   export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
@@ -42,8 +42,11 @@ is_true() {
 }
 
 shutdown() {
-  if [[ -n "${VLLM_PID:-}" ]] && kill -0 "${VLLM_PID}" 2>/dev/null; then
-    kill -TERM "${VLLM_PID}" 2>/dev/null || true
+  if [[ -n "${DYNAMO_FRONTEND_PID:-}" ]] && kill -0 "${DYNAMO_FRONTEND_PID}" 2>/dev/null; then
+    kill -TERM "${DYNAMO_FRONTEND_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${DYNAMO_WORKER_PID:-}" ]] && kill -0 "${DYNAMO_WORKER_PID}" 2>/dev/null; then
+    kill -TERM "${DYNAMO_WORKER_PID}" 2>/dev/null || true
   fi
 }
 
@@ -55,11 +58,19 @@ handle_signal() {
 
 trap handle_signal SIGTERM SIGINT
 
-VLLM_CMD=(
-  python -m vllm.entrypoints.openai.api_server
-  --host "${VLLM_HOST}"
-  --port "${VLLM_PORT}"
+# --- Dynamo frontend (OpenAI-compat HTTP server, internal only) ---
+echo "[entrypoint] starting Dynamo frontend on port ${DYNAMO_FRONTEND_PORT}"
+python3 -m dynamo.frontend \
+  --http-port "${DYNAMO_FRONTEND_PORT}" \
+  --store-kv file &
+DYNAMO_FRONTEND_PID=$!
+
+# --- Dynamo vLLM worker ---
+WORKER_CMD=(
+  python3 -m dynamo.vllm
   --model "${MODEL_ID}"
+  --store-kv file
+  --kv-events-config '{"enable_kv_cache_events": false}'
   --dtype "${DTYPE}"
   --tensor-parallel-size "${TENSOR_PARALLEL}"
   --max-model-len "${MAX_MODEL_LEN}"
@@ -68,26 +79,26 @@ VLLM_CMD=(
 )
 
 if is_true "${TRUST_REMOTE_CODE}"; then
-  VLLM_CMD+=(--trust-remote-code)
+  WORKER_CMD+=(--trust-remote-code)
 fi
 
-if [[ -n "${EXTRA_VLLM_ARGS}" ]]; then
+if [[ -n "${DYNAMO_EXTRA_VLLM_ARGS}" ]]; then
   # shellcheck disable=SC2206
-  EXTRA_ARGS=( ${EXTRA_VLLM_ARGS} )
-  VLLM_CMD+=("${EXTRA_ARGS[@]}")
+  EXTRA_ARGS=( ${DYNAMO_EXTRA_VLLM_ARGS} )
+  WORKER_CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "[entrypoint] starting vLLM model=${MODEL_ID} on ${VLLM_HOST}:${VLLM_PORT}"
-"${VLLM_CMD[@]}" &
-VLLM_PID=$!
+echo "[entrypoint] starting Dynamo vLLM worker model=${MODEL_ID}"
+"${WORKER_CMD[@]}" &
+DYNAMO_WORKER_PID=$!
 
-wait_for_vllm() {
-  local deadline=$((SECONDS + VLLM_READY_TIMEOUT_SECONDS))
-  local health_url="http://${VLLM_HOST}:${VLLM_PORT}/health"
-  local completion_url="http://${VLLM_HOST}:${VLLM_PORT}/v1/chat/completions"
+wait_for_dynamo() {
+  local deadline=$((SECONDS + DYNAMO_READY_TIMEOUT_SECONDS))
+  local models_url="http://127.0.0.1:${DYNAMO_FRONTEND_PORT}/v1/models"
+  local completion_url="http://127.0.0.1:${DYNAMO_FRONTEND_PORT}/v1/chat/completions"
 
   while (( SECONDS < deadline )); do
-    if curl -fsS --max-time 3 "${health_url}" >/dev/null 2>&1; then
+    if curl -fsS --max-time 3 "${models_url}" >/dev/null 2>&1; then
       return 0
     fi
 
@@ -98,20 +109,20 @@ wait_for_vllm() {
       return 0
     fi
 
-    sleep "${VLLM_READY_POLL_SECONDS}"
+    sleep "${DYNAMO_READY_POLL_SECONDS}"
   done
 
   return 1
 }
 
-if ! wait_for_vllm; then
-  echo "[entrypoint] vLLM readiness failed after ${VLLM_READY_TIMEOUT_SECONDS}s" >&2
+if ! wait_for_dynamo; then
+  echo "[entrypoint] Dynamo readiness failed after ${DYNAMO_READY_TIMEOUT_SECONDS}s" >&2
   shutdown
   wait || true
   exit 1
 fi
 
-echo "[entrypoint] vLLM is ready; starting gateway on ${GATEWAY_HOST}:${GATEWAY_PORT}"
+echo "[entrypoint] Dynamo is ready; starting gateway on ${GATEWAY_HOST}:${GATEWAY_PORT}"
 set +e
 python -m uvicorn gateway.main:app --host "${GATEWAY_HOST}" --port "${GATEWAY_PORT}" --log-level info
 EXIT_CODE=$?

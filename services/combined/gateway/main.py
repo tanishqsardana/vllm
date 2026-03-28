@@ -127,7 +127,7 @@ class Settings:
             admin_group=_clean_optional(cfg.get("ADMIN_GROUP")),
             global_max_concurrent=int(cfg["GLOBAL_MAX_CONCURRENT"]),
             max_body_bytes=int(cfg["MAX_BODY_BYTES"]),
-            upstream_url=f"http://127.0.0.1:{int(cfg['VLLM_PORT'])}",
+            upstream_url=f"http://127.0.0.1:{int(cfg.get('DYNAMO_FRONTEND_PORT') or cfg['VLLM_PORT'])}",
             upstream_timeout_seconds=float(cfg["UPSTREAM_TIMEOUT_SECONDS"]),
             build_sha=str(cfg["BUILD_SHA"]),
             build_time=str(cfg["BUILD_TIME"]),
@@ -392,10 +392,12 @@ async def _probe_upstream() -> bool:
     settings: Settings = app.state.settings
 
     try:
-        resp = await client.get(f"{settings.upstream_url}/health")
+        resp = await client.get(f"{settings.upstream_url}/v1/models")
         if resp.status_code == 200:
-            return True
-    except httpx.HTTPError:
+            body = resp.json()
+            if isinstance(body, dict) and body.get("data"):
+                return True
+    except (httpx.HTTPError, ValueError):
         pass
 
     try:
@@ -1412,6 +1414,9 @@ async def chat_completions(request: Request) -> Response:
             if k.lower() not in {"host", "content-length", "connection", "authorization"}
         }
         forward_headers["x-request-id"] = request_id
+
+        # TODO: Inject Dynamo per-request hints (priority, cache_ttl) based on tenant policy
+        # Example: payload["extra_body"] = {"priority": tenant_priority_level}
 
         upstream_response: httpx.Response
         upstream_start = time.perf_counter()
