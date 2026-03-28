@@ -22,7 +22,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     BUILD_SHA=${BUILD_SHA} \
     BUILD_TIME=${BUILD_TIME} \
     DYN_FILE_KV=/data/dynamo_kv \
-    DYNAMO_FRONTEND_PORT=8001
+    DYNAMO_FRONTEND_PORT=8001 \
+    DYNAMO_WORKER_METRICS_PORT=8081
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \

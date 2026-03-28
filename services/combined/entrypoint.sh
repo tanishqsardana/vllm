@@ -10,6 +10,7 @@ fi
 GATEWAY_HOST="${GATEWAY_HOST:-0.0.0.0}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
 DYNAMO_FRONTEND_PORT="${DYNAMO_FRONTEND_PORT:-8001}"
+DYNAMO_WORKER_METRICS_PORT="${DYNAMO_WORKER_METRICS_PORT:-8081}"
 
 DTYPE="${DTYPE:-bfloat16}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
@@ -28,6 +29,8 @@ export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-/cache/vllm}"
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
 export DYN_FILE_KV="${DYN_FILE_KV:-/data/dynamo_kv}"
 
+# Enable Dynamo worker system metrics endpoint
+export DYN_SYSTEM_PORT="${DYNAMO_WORKER_METRICS_PORT}"
 mkdir -p "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}" "${VLLM_CACHE_ROOT}" /data "${DYN_FILE_KV}"
 
 if [[ -n "${HF_TOKEN:-}" ]]; then
@@ -88,7 +91,7 @@ if [[ -n "${DYNAMO_EXTRA_VLLM_ARGS}" ]]; then
   WORKER_CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "[entrypoint] starting Dynamo vLLM worker model=${MODEL_ID}"
+echo "[entrypoint] starting Dynamo vLLM worker model=${MODEL_ID} metrics_port=${DYNAMO_WORKER_METRICS_PORT}"
 "${WORKER_CMD[@]}" &
 DYNAMO_WORKER_PID=$!
 

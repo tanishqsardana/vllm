@@ -10,6 +10,7 @@ from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+from .dynamo_metrics import DynamoMetricsScraper
 
 import httpx
 import yaml
@@ -615,6 +616,13 @@ async def startup() -> None:
     app.state.admin_auth = admin_auth
     app.state.profiles = _load_profiles(settings)
 
+    dynamo_worker_metrics_port = int(os.getenv("DYNAMO_WORKER_METRICS_PORT", "8081"))
+    dynamo_scraper = DynamoMetricsScraper(
+        frontend_url=settings.upstream_url,
+        worker_metrics_url=f"http://127.0.0.1:{dynamo_worker_metrics_port}",
+    )
+    app.state.dynamo_scraper = dynamo_scraper
+
     json_log(
         "gateway_started",
         model_id=settings.model_id,
@@ -629,6 +637,8 @@ async def startup() -> None:
         profiles_path=settings.profiles_path,
         gpu_metrics_poll_interval_seconds=settings.gpu_metrics_poll_interval_seconds,
         gpu_hourly_rate=settings.gpu_hourly_rate,
+        dynamo_frontend_url=settings.upstream_url,
+        dynamo_worker_metrics_port=dynamo_worker_metrics_port,
     )
 
 
@@ -639,6 +649,10 @@ async def shutdown() -> None:
     gpu_metrics_poller: GPUMetricsPoller = app.state.gpu_metrics_poller
 
     await gpu_metrics_poller.stop()
+
+    dynamo_scraper: DynamoMetricsScraper = app.state.dynamo_scraper
+    await dynamo_scraper.close()
+
     await client.aclose()
     db.close()
 
@@ -1235,7 +1249,21 @@ async def generate_profile_runpod(name: str, request: Request) -> dict[str, Any]
         "notes": notes,
     }
 
+@app.get("/admin/dynamo/status")
+async def dynamo_status(request: Request) -> dict:
+    """Dynamo topology: frontend health, worker health, model config from registration."""
+    await _check_admin(request)
+    scraper: DynamoMetricsScraper = app.state.dynamo_scraper
+    return await scraper.get_dynamo_status()
 
+
+@app.get("/admin/dynamo/metrics")
+async def dynamo_metrics(request: Request) -> dict:
+    """Live Dynamo inference metrics: TTFT, ITL, inflight, cache usage, worker stats."""
+    await _check_admin(request)
+    scraper: DynamoMetricsScraper = app.state.dynamo_scraper
+    return await scraper.get_dynamo_metrics()
+    
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Response:
     settings: Settings = app.state.settings
