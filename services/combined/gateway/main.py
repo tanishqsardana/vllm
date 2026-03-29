@@ -1372,6 +1372,10 @@ async def chat_completions(request: Request) -> Response:
     if not bool(auth_row.get("seat_is_active")):
         return finalize_error(401, "unauthorized", "seat inactive", rejection_reason="auth")
 
+    expected_tenant_id = request.headers.get("x-expected-tenant-id")
+    if expected_tenant_id and expected_tenant_id != tenant_id:
+        return finalize_error(403, "unauthorized", "tenant mismatch: API key does not belong to the selected tenant", rejection_reason="auth")
+
     try:
         body = await request.body()
         if len(body) > settings.max_body_bytes:

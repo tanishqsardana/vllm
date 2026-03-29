@@ -64,12 +64,12 @@ class UsageTenantRow(BaseModel):
 
 
 class UsageResponse(BaseModel):
-    window: Literal["1h", "24h", "7d"]
+    window: Literal["1h", "24h", "7d", "30d"]
     data: list[UsageTenantRow]
 
 
 class UsageTenantsResponse(BaseModel):
-    window: Literal["1h", "24h", "7d"]
+    window: Literal["1h", "24h", "7d", "30d"]
     cost_estimation_enabled: bool
     data: list[UsageTenantRow]
 
@@ -89,7 +89,7 @@ class UsageSeatRow(BaseModel):
 
 
 class UsageSeatsResponse(BaseModel):
-    window: Literal["1h", "24h", "7d"]
+    window: Literal["1h", "24h", "7d", "30d"]
     tenant_id: str
     cost_estimation_enabled: bool
     data: list[UsageSeatRow]
@@ -224,7 +224,7 @@ class AuditEventPublic(BaseModel):
 
 
 class AuditResponse(BaseModel):
-    window: Literal["1h", "24h", "7d"]
+    window: Literal["1h", "24h", "7d", "30d"]
     data: list[AuditEventPublic]
 
 

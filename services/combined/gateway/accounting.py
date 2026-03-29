@@ -12,9 +12,10 @@ def parse_window(window: str) -> int:
         "1h": 3600,
         "24h": 24 * 3600,
         "7d": 7 * 24 * 3600,
+        "30d": 30 * 24 * 3600,
     }
     if window not in mapping:
-        raise ValueError("window must be one of 1h, 24h, 7d")
+        raise ValueError("window must be one of 1h, 24h, 7d, 30d")
     return mapping[window]
 
 

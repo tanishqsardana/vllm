@@ -466,7 +466,7 @@ function TenantsTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({
-    name: "", tier: "standard",
+    name: "", tier: "starter",
     max_concurrent: "", rpm_limit: "", tpm_limit: "",
     budget_limit: "", budget_window: "month",
     max_context_tokens: "", max_output_tokens: "",
@@ -513,7 +513,7 @@ function TenantsTab({ baseUrl, token, toast }) {
 
       setShowAdd(false);
       if (key) setRevealKey(key); else toast("Tenant created");
-      setForm({ name: "", tier: "standard", max_concurrent: "", rpm_limit: "", tpm_limit: "", budget_limit: "", budget_window: "month", max_context_tokens: "", max_output_tokens: "" });
+      setForm({ name: "", tier: "starter", max_concurrent: "", rpm_limit: "", tpm_limit: "", budget_limit: "", budget_window: "month", max_context_tokens: "", max_output_tokens: "" });
       load();
     } catch (e) { toast(e.message, "error"); } finally { setSaving(false); }
   };
@@ -617,15 +617,21 @@ function TenantsTab({ baseUrl, token, toast }) {
   );
 }
 
-/* ═══════════════════ KEYS TAB [FIX 1 & 10: correct endpoints and body] ═══════════════════ */
+/* ═══════════════════ KEYS TAB ═══════════════════ */
 function KeysTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [keys, setKeys] = useState([]);
+  const [seats, setSeats] = useState([]);
   const [selTenant, setSelTenant] = useState(""); const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false); const [keyName, setKeyName] = useState("");
+  const [keySeatId, setKeySeatId] = useState("");
   const [revealKey, setRevealKey] = useState(null);
 
+  // Seat creation state
+  const [showAddSeat, setShowAddSeat] = useState(false);
+  const [seatForm, setSeatForm] = useState({ seat_name: "", role: "user" });
+  const [creatingSeat, setCreatingSeat] = useState(false);
+
   const loadTenants = () => apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length && !selTenant) setSelTenant(t[0].id); }).catch(() => {});
-  /* FIX 1: Use /admin/keys?tenant_id= instead of /admin/tenants/{tid}/keys */
   const loadKeys = (tid) => {
     if (!tid) return;
     apiFetch(baseUrl, `/admin/keys?tenant_id=${tid}`, { token })
@@ -633,38 +639,58 @@ function KeysTab({ baseUrl, token, toast }) {
       .catch(() => setKeys([]))
       .finally(() => setLoading(false));
   };
+  const loadSeats = (tid) => {
+    if (!tid) return;
+    apiFetch(baseUrl, `/admin/seats?tenant_id=${tid}`, { token })
+      .then(r => { const arr = Array.isArray(r) ? r : (r.seats || r.data || r.items || []); setSeats(arr); })
+      .catch(() => setSeats([]));
+  };
   useEffect(() => { loadTenants(); }, []);
-  useEffect(() => { if (selTenant) loadKeys(selTenant); }, [selTenant]);
+  useEffect(() => { if (selTenant) { loadKeys(selTenant); loadSeats(selTenant); setKeySeatId(""); } }, [selTenant]);
 
   const create = async () => {
     if (!selTenant) return;
     setCreating(true);
     try {
       const kn = keyName || `key-${Date.now()}`;
-      /* FIX 1 & 10: POST /admin/keys with tenant_id in body, not in URL path */
-      const res = await apiFetch(baseUrl, `/admin/keys`, {
-        token, method: "POST",
-        body: { tenant_id: selTenant, name: kn }
-      });
+      const body = { tenant_id: selTenant, name: kn };
+      if (keySeatId) body.seat_id = keySeatId;
+      const res = await apiFetch(baseUrl, `/admin/keys`, { token, method: "POST", body });
       const key = res.api_key || res.key || res.raw_key || res.token;
-      if (key && typeof key === "string") {
-        setRevealKey(key);
-      } else {
-        toast("Key created (check keys list)", "info");
-      }
-      setKeyName(""); loadKeys(selTenant);
+      if (key && typeof key === "string") { setRevealKey(key); } else { toast("Key created (check keys list)", "info"); }
+      setKeyName(""); setKeySeatId(""); loadKeys(selTenant);
     } catch (e) { toast(e.message, "error"); } finally { setCreating(false); }
   };
 
-  /* FIX 1: Use POST /admin/keys/{kid}/revoke instead of DELETE */
   const revoke = async (kid) => {
     if (!confirm("Revoke this key? This cannot be undone.")) return;
     try {
       await apiFetch(baseUrl, `/admin/keys/${kid}/revoke`, { token, method: "POST" });
-      toast("Key revoked");
-      loadKeys(selTenant);
+      toast("Key revoked"); loadKeys(selTenant);
     } catch (e) { toast(e.message, "error"); }
   };
+
+  const createSeat = async () => {
+    if (!selTenant || !seatForm.seat_name.trim()) { toast("Seat name is required", "error"); return; }
+    setCreatingSeat(true);
+    try {
+      await apiFetch(baseUrl, "/admin/seats", { token, method: "POST", body: { tenant_id: selTenant, seat_name: seatForm.seat_name.trim(), role: seatForm.role } });
+      toast("Seat created");
+      setSeatForm({ seat_name: "", role: "user" });
+      setShowAddSeat(false);
+      loadSeats(selTenant);
+    } catch (e) { toast(e.message, "error"); } finally { setCreatingSeat(false); }
+  };
+
+  const deactivateSeat = async (sid, active) => {
+    try {
+      await apiFetch(baseUrl, `/admin/seats/${sid}`, { token, method: "PATCH", body: { is_active: !active } });
+      toast(active ? "Seat deactivated" : "Seat activated");
+      loadSeats(selTenant);
+    } catch (e) { toast(e.message, "error"); }
+  };
+
+  const activeSeatOptions = seats.filter(s => s.is_active !== false);
 
   return (
     <Anim>
@@ -679,11 +705,70 @@ function KeysTab({ baseUrl, token, toast }) {
           </div>
         </Card>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Seats section */}
+          <Card style={{ padding: 0 }}>
+            <div style={{ padding: "12px 16px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>Seats</span>
+                <span style={{ fontSize: 12, color: T.textTert, marginLeft: 8 }}>({seats.length})</span>
+                <span style={{ fontSize: 11, color: T.textTert, marginLeft: 8 }}>· A seat represents a named user or service identity. Keys tied to a seat inherit its role.</span>
+              </div>
+              <Btn small onClick={() => setShowAddSeat(v => !v)}><SVG d="M12 4v16m8-8H4" size={12} /> Add Seat</Btn>
+            </div>
+            {showAddSeat && (
+              <div style={{ padding: "12px 16px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 8, alignItems: "flex-end", background: T.accentLight + "60" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Seat Name</div>
+                  <Input value={seatForm.seat_name} onChange={v => setSeatForm(f => ({ ...f, seat_name: v }))} placeholder="e.g. alice@company.com" />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Role</div>
+                  <Select value={seatForm.role} onChange={v => setSeatForm(f => ({ ...f, role: v }))}>
+                    <option value="user">user</option>
+                    <option value="admin">admin</option>
+                    <option value="service">service</option>
+                  </Select>
+                </div>
+                <Btn onClick={createSeat} disabled={creatingSeat}>{creatingSeat ? <><Spinner /> Saving…</> : "Save"}</Btn>
+                <Btn variant="ghost" onClick={() => setShowAddSeat(false)}>Cancel</Btn>
+              </div>
+            )}
+            {seats.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "18px 0", color: T.textTert, fontSize: 13 }}>No seats yet — seats are optional named identities (users or services)</div>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead><tr>{["Name", "Role", "Status", ""].map(h => <th key={h} style={{ textAlign: "left", padding: "7px 16px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
+                <tbody>{seats.map(s => (
+                  <tr key={s.seat_id} style={{ borderBottom: `1px solid ${T.border}` }}>
+                    <td style={{ padding: "9px 16px", fontWeight: 600, color: T.text }}>{s.seat_name || "—"}</td>
+                    <td style={{ padding: "9px 16px" }}><Badge variant={s.role === "admin" ? "warning" : s.role === "service" ? "purple" : "default"}>{s.role}</Badge></td>
+                    <td style={{ padding: "9px 16px" }}>{s.is_active !== false ? <Badge variant="success">Active</Badge> : <Badge variant="danger">Inactive</Badge>}</td>
+                    <td style={{ padding: "9px 16px" }}><Btn variant={s.is_active !== false ? "danger" : "primary"} small onClick={() => deactivateSeat(s.seat_id, s.is_active !== false)}>{s.is_active !== false ? "Deactivate" : "Activate"}</Btn></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
+          </Card>
+
+          {/* API Keys section */}
           <Card>
             <SectionLabel>New API Key</SectionLabel>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Input value={keyName} onChange={setKeyName} placeholder="Key name (optional)" style={{ flex: 1 }} />
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Key Name (optional)</div>
+                <Input value={keyName} onChange={setKeyName} placeholder="e.g. production-key" />
+              </div>
+              <div style={{ minWidth: 180 }}>
+                <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Assign to Seat (optional)</div>
+                <Select value={keySeatId} onChange={setKeySeatId} style={{ width: "100%" }}>
+                  <option value="">— Service key (no seat) —</option>
+                  {activeSeatOptions.map(s => <option key={s.seat_id} value={s.seat_id}>{s.seat_name} ({s.role})</option>)}
+                </Select>
+              </div>
               <Btn onClick={create} disabled={creating || !selTenant}>{creating ? <><Spinner /> Creating…</> : <><SVG d="M12 4v16m8-8H4" size={13} /> Create Key</>}</Btn>
+            </div>
+            <div style={{ marginTop: 8, fontSize: 11, color: T.textTert }}>
+              A <strong>service key</strong> is not tied to any seat — use it for server-to-server or automated access. A <strong>seat key</strong> is linked to a named identity and inherits that seat's role and active status.
             </div>
           </Card>
           <Card style={{ padding: 0 }}>
@@ -692,11 +777,13 @@ function KeysTab({ baseUrl, token, toast }) {
               <span style={{ fontSize: 12, color: T.textTert, marginLeft: 8 }}>({keys.length})</span>
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead><tr>{["Seat", "Role", "Created", "Revoked", ""].map(h => <th key={h} style={{ textAlign: "left", padding: "8px 16px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
+              <thead><tr>{["Name / Seat", "Role", "Created", "Status", ""].map(h => <th key={h} style={{ textAlign: "left", padding: "8px 16px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
               <tbody>{keys.map(k => (
                 <tr key={k.id} style={{ borderBottom: `1px solid ${T.border}` }}>
-                  <td style={{ padding: "10px 16px", fontWeight: 600, color: T.text }}>{k.seat_name || k.name || "service"}</td>
-                  <td style={{ padding: "10px 16px", color: T.textSec }}>{k.role || "—"}</td>
+                  <td style={{ padding: "10px 16px", fontWeight: 600, color: T.text }}>
+                    {k.seat_name ? <span>{k.seat_name} <span style={{ fontSize: 11, fontWeight: 400, color: T.textTert }}>(seat)</span></span> : k.name || <span style={{ color: T.textTert, fontWeight: 400, fontStyle: "italic" }}>service key</span>}
+                  </td>
+                  <td style={{ padding: "10px 16px" }}>{k.role ? <Badge variant={k.role === "admin" ? "warning" : k.role === "service" ? "purple" : "default"}>{k.role}</Badge> : <span style={{ color: T.textTert }}>—</span>}</td>
                   <td style={{ padding: "10px 16px", color: T.textSec }}>{k.created_at ? fmtTime(k.created_at) : "—"}</td>
                   <td style={{ padding: "10px 16px" }}>{k.revoked_at ? <Badge variant="danger">Revoked</Badge> : <Badge variant="success">Active</Badge>}</td>
                   <td style={{ padding: "10px 16px" }}>{!k.revoked_at && <Btn variant="danger" small onClick={() => revoke(k.id)}>Revoke</Btn>}</td>
@@ -949,7 +1036,7 @@ function AuditTab({ baseUrl, token }) {
   );
 }
 
-/* ═══════════════════ USAGE TAB [FIX 2: use /admin/usage/tenants aggregate] ═══════════════════ */
+/* ═══════════════════ USAGE TAB ═══════════════════ */
 function UsageTab({ baseUrl, token }) {
   const [rows, setRows] = useState([]); const [loading, setLoading] = useState(true);
   const [window_, setWindow_] = useState("24h");
@@ -957,39 +1044,76 @@ function UsageTab({ baseUrl, token }) {
 
   useEffect(() => {
     setLoading(true);
-    /* FIX 2: Use aggregate /admin/usage/tenants?window= instead of per-tenant calls */
     apiFetch(baseUrl, `/admin/usage/tenants?window=${window_}`, { token })
-      .then(r => {
-        setRows(r.data || []);
-        setCostEnabled(r.cost_estimation_enabled || false);
-      })
+      .then(r => { setRows(r.data || []); setCostEnabled(r.cost_estimation_enabled || false); })
       .catch(() => setRows([]))
       .finally(() => setLoading(false));
   }, [window_]);
+
+  const totals = rows.reduce((acc, u) => ({
+    requests: acc.requests + (u.requests || 0),
+    errors: acc.errors + (u.errors || 0),
+    tokens: acc.tokens + (u.total_tokens || 0),
+    cost: acc.cost + (u.cost_est_sum || 0),
+  }), { requests: 0, errors: 0, tokens: 0, cost: 0 });
+
+  const errRate = totals.requests > 0 ? ((totals.errors / totals.requests) * 100).toFixed(1) : "0.0";
+
+  const kpis = [
+    { label: "Total Requests", value: totals.requests.toLocaleString(), icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z", color: T.accent },
+    { label: "Total Tokens", value: totals.tokens >= 1e6 ? `${(totals.tokens / 1e6).toFixed(2)}M` : totals.tokens.toLocaleString(), icon: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4", color: T.accent2 },
+    { label: "Error Rate", value: `${errRate}%`, icon: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z", color: totals.errors > 0 ? T.danger : T.success },
+    ...(costEnabled ? [{ label: "Est. Cost", value: `$${totals.cost.toFixed(4)}`, icon: "M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 10v-1m0-9a9 9 0 110 18A9 9 0 0112 3z", color: T.warning }] : []),
+  ];
 
   return (
     <Anim>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text }}>Tenant Usage</h2>
         <Select value={window_} onChange={setWindow_}>
-          {["1h", "24h", "7d"].map(w => <option key={w} value={w}>{w}</option>)}
+          {["1h", "24h", "7d", "30d"].map(w => <option key={w} value={w}>{w}</option>)}
         </Select>
       </div>
+
+      {/* KPI summary cards */}
+      {!loading && rows.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${kpis.length}, 1fr)`, gap: 12, marginBottom: 16 }}>
+          {kpis.map(k => (
+            <Card key={k.label} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px" }}>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: k.color + "18", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <SVG d={k.icon} size={18} color={k.color} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: T.textTert, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>{k.label}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: k.color, lineHeight: 1.2 }}>{k.value}</div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
       {loading ? <div style={{ textAlign: "center", padding: 40 }}><Spinner size={20} /></div> : (
         <Card style={{ padding: 0 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Tenant", "Requests", "Errors", "Prompt Tokens", "Completion Tokens", "p95 Latency", costEnabled ? "Cost Est" : null].filter(Boolean).map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
-            <tbody>{rows.map(u => (
-              <tr key={u.tenant_id} style={{ borderBottom: `1px solid ${T.border}` }}>
-                <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{u.tenant_name || u.tenant_id}</td>
-                <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.requests || 0).toLocaleString()}</td>
-                <td style={{ padding: "10px 14px", color: u.errors > 0 ? T.danger : T.textSec }}>{u.errors || 0}</td>
-                <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.prompt_tokens || 0).toLocaleString()}</td>
-                <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.completion_tokens || 0).toLocaleString()}</td>
-                <td style={{ padding: "10px 14px", color: T.textSec }}>{u.p95_latency_ms ? `${u.p95_latency_ms}ms` : "—"}</td>
-                {costEnabled && <td style={{ padding: "10px 14px", color: T.text, fontWeight: 600 }}>${(u.cost_est_sum || 0).toFixed(4)}</td>}
-              </tr>
-            ))}</tbody>
+            <thead><tr>{["Tenant", "Requests", "Errors", "Error Rate", "Prompt Tokens", "Completion Tokens", "Total Tokens", "p95 Latency", costEnabled ? "Cost Est" : null].filter(Boolean).map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
+            <tbody>{rows.map(u => {
+              const rate = u.requests > 0 ? ((u.errors / u.requests) * 100).toFixed(1) : "0.0";
+              return (
+                <tr key={u.tenant_id} style={{ borderBottom: `1px solid ${T.border}` }}>
+                  <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{u.tenant_name || u.tenant_id}</td>
+                  <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.requests || 0).toLocaleString()}</td>
+                  <td style={{ padding: "10px 14px", color: u.errors > 0 ? T.danger : T.textSec }}>{u.errors || 0}</td>
+                  <td style={{ padding: "10px 14px" }}>
+                    <span style={{ color: parseFloat(rate) > 5 ? T.danger : parseFloat(rate) > 1 ? T.warning : T.success, fontWeight: 600 }}>{rate}%</span>
+                  </td>
+                  <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.prompt_tokens || 0).toLocaleString()}</td>
+                  <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.completion_tokens || 0).toLocaleString()}</td>
+                  <td style={{ padding: "10px 14px", color: T.textSec, fontWeight: 600 }}>{(u.total_tokens || 0).toLocaleString()}</td>
+                  <td style={{ padding: "10px 14px", color: T.textSec }}>{u.p95_latency_ms ? `${u.p95_latency_ms}ms` : "—"}</td>
+                  {costEnabled && <td style={{ padding: "10px 14px", color: T.text, fontWeight: 600 }}>${(u.cost_est_sum || 0).toFixed(4)}</td>}
+                </tr>
+              );
+            })}</tbody>
           </table>
           {rows.length === 0 && <div style={{ textAlign: "center", padding: "28px 0", color: T.textTert, fontSize: 13 }}>No usage data in this window</div>}
         </Card>
@@ -998,46 +1122,87 @@ function UsageTab({ baseUrl, token }) {
   );
 }
 
-/* ═══════════════════ TEST TAB [FIX 9: pass token to admin calls] ═══════════════════ */
+/* ═══════════════════ TEST TAB ═══════════════════ */
 function TestTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [selTenant, setSelTenant] = useState("");
-  const [keys, setKeys] = useState([]); const [selKey, setSelKey] = useState("");
+  const [tenantKeyIds, setTenantKeyIds] = useState(new Set());
+  const [apiKey, setApiKey] = useState("");
+  const [keyError, setKeyError] = useState("");
   const [prompt, setPrompt] = useState("Explain enterprise AI governance in 3 sentences."); const [result, setResult] = useState(null); const [loading, setLoading] = useState(false);
-  /* FIX 9: Pass token to admin API calls */
+
   useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
-  /* FIX 9: Use correct keys endpoint with token */
-  useEffect(() => { if (selTenant) apiFetch(baseUrl, `/admin/keys?tenant_id=${selTenant}`, { token }).then(r => { const k = normalizeKeys(r); setKeys(k); if (k.length) setSelKey(k[0].id); }).catch(() => setKeys([])); }, [selTenant]);
+
+  // When tenant changes, clear the API key field and load that tenant's key IDs for validation
+  useEffect(() => {
+    setApiKey("");
+    setKeyError("");
+    setResult(null);
+    if (selTenant) {
+      apiFetch(baseUrl, `/admin/keys?tenant_id=${selTenant}`, { token })
+        .then(r => { const k = normalizeKeys(r); setTenantKeyIds(new Set(k.map(ki => ki.id))); })
+        .catch(() => setTenantKeyIds(new Set()));
+    }
+  }, [selTenant]);
+
+  const validateKey = (key) => {
+    if (!key || !key.startsWith("cp_")) {
+      setKeyError("API keys start with cp_ — paste the full key shown at creation time.");
+    } else {
+      setKeyError("");
+    }
+  };
 
   const run = async () => {
+    if (!apiKey.trim()) { toast("Paste a cp_… API key first", "error"); return; }
     setLoading(true); setResult(null);
     try {
-      // For the test tab, we need to use the actual API key value, not the key_id.
-      // Since the backend only returns key_id (the raw key is shown once at creation),
-      // the user should paste an API key. Use selKey as a raw bearer token.
       const res = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${selKey}` },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey.trim()}`,
+          "X-Expected-Tenant-Id": selTenant,
+        },
         body: JSON.stringify({ model: "default", messages: [{ role: "user", content: prompt }], max_tokens: 256 })
       });
-      const data = await res.json(); setResult(data);
+      const data = await res.json();
+      if (!res.ok && data?.error?.message?.includes("tenant mismatch")) {
+        setKeyError("This API key belongs to a different tenant. Select the correct tenant or use the right key.");
+      }
+      setResult(data);
     } catch (e) { toast(e.message, "error"); } finally { setLoading(false); }
   };
+
+  const resultColor = result && (result.error || result.choices === undefined) ? T.danger : T.success;
+
   return (
     <Anim>
       <Card style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <SectionLabel>Test Inference</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div><SectionLabel>Tenant</SectionLabel><Select value={selTenant} onChange={setSelTenant} style={{ width: "100%" }}>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</Select></div>
           <div>
-            <SectionLabel>API Key (paste raw key)</SectionLabel>
-            <Input value={selKey} onChange={setSelKey} placeholder="cp_…" />
+            <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Tenant</div>
+            <Select value={selTenant} onChange={setSelTenant} style={{ width: "100%" }}>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</Select>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>API Key <span style={{ color: T.textTert }}>(paste the cp_… key — shown once at creation)</span></div>
+            <Input value={apiKey} onChange={v => { setApiKey(v); validateKey(v); }} placeholder="cp_…" />
+            {keyError && <div style={{ fontSize: 11, color: T.danger, marginTop: 4 }}>{keyError}</div>}
           </div>
         </div>
-        <div><SectionLabel>Prompt</SectionLabel><textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={4} style={{ width: "100%", padding: "9px 11px", fontSize: 13, border: `1px solid ${T.border}`, borderRadius: 8, outline: "none", resize: "vertical", fontFamily: "inherit", color: T.text, background: T.bg, boxSizing: "border-box" }} /></div>
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <Btn onClick={run} disabled={loading}>{loading ? <><Spinner /> Running…</> : "Send Request"}</Btn>
+        <div>
+          <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Prompt</div>
+          <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={4} style={{ width: "100%", padding: "9px 11px", fontSize: 13, border: `1px solid ${T.border}`, borderRadius: 8, outline: "none", resize: "vertical", fontFamily: "inherit", color: T.text, background: T.bg, boxSizing: "border-box" }} />
         </div>
-        <div><SectionLabel>Response</SectionLabel><pre style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 10, padding: 14, fontSize: 12, color: T.text, overflow: "auto", height: 280, whiteSpace: "pre-wrap", margin: 0, fontFamily: "'JetBrains Mono', monospace" }}>{result ? JSON.stringify(result, null, 2) : "Send a request to see results"}</pre></div>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <Btn onClick={run} disabled={loading || !apiKey.trim()}>{loading ? <><Spinner /> Running…</> : "Send Request"}</Btn>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Response</div>
+          <pre style={{ background: T.bg, border: `1px solid ${result ? (result.error ? T.dangerBorder : T.successBorder) : T.border}`, borderRadius: 10, padding: 14, fontSize: 12, color: result ? resultColor : T.textTert, overflow: "auto", height: 280, whiteSpace: "pre-wrap", margin: 0, fontFamily: "'JetBrains Mono', monospace" }}>
+            {result ? JSON.stringify(result, null, 2) : "Send a request to see results"}
+          </pre>
+        </div>
       </Card>
     </Anim>
   );
