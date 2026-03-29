@@ -45,7 +45,6 @@ function normalizeTenants(raw) {
   else if (raw?.items) arr = raw.items;
   else if (raw?.data) arr = raw.data;
   else arr = [];
-  // Normalize: ensure every tenant has .id and .name regardless of backend field names
   return arr.map(t => ({
     ...t,
     id: t.id || t.tenant_id,
@@ -147,7 +146,6 @@ function Modal({ title, onClose, children, width = 480 }) {
 }
 
 /* ═══════════════════ API KEY COPY MODAL ═══════════════════ */
-// Change 1: Persistent key reveal modal with copy button and explicit dismiss
 function ApiKeyCopyModal({ apiKey, onClose }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
@@ -208,7 +206,7 @@ function ConnectScreen({ onConnect }) {
   );
 }
 
-/* ═══════════════════ OVERVIEW TAB ═══════════════════ */
+/* ═══════════════════ OVERVIEW TAB [FIX 8: version fields] ═══════════════════ */
 function OverviewTab({ baseUrl, token }) {
   const [data, setData] = useState(null); const [loading, setLoading] = useState(true);
   useEffect(() => {
@@ -261,8 +259,9 @@ function OverviewTab({ baseUrl, token }) {
         </Card>
         <Card>
           <SectionLabel>System Info</SectionLabel>
+          {/* FIX 8: Use correct field names from backend GatewayVersion */}
           {[
-            ["Gateway Version", version.version || "—"],
+            ["Build SHA", version.build_sha || "—"],
             ["Model", version.model_id || "—"],
             ["Admin Auth", version.admin_auth_mode || "—"],
             ["Max Concurrent", version.global_max_concurrent ?? "—"],
@@ -278,7 +277,7 @@ function OverviewTab({ baseUrl, token }) {
   );
 }
 
-/* ═══════════════════ LIVE TAB ═══════════════════ */
+/* ═══════════════════ LIVE TAB [FIX 4: nested response parsing] ═══════════════════ */
 function LiveTab({ baseUrl, token }) {
   const [metrics, setMetrics] = useState(null); const [history, setHistory] = useState([]); const histRef = useRef([]);
   const [error, setError] = useState(null);
@@ -289,11 +288,14 @@ function LiveTab({ baseUrl, token }) {
         const m = await apiFetch(baseUrl, "/admin/dynamo/metrics", { token });
         if (!active) return;
         setMetrics(m); setError(null);
+        /* FIX 4: Backend returns { frontend: { inflight_requests, queued_requests, ... }, worker: { requests_running, requests_waiting, ... } } */
+        const fe = m.frontend || {};
+        const wk = m.worker || {};
         const point = {
           t: Date.now(),
-          inflight: m.total_inflight ?? m.inflight_requests ?? m.num_requests_running ?? 0,
-          queued: m.total_queued ?? m.queued_requests ?? m.num_requests_waiting ?? 0,
-          tps: m.tokens_per_second ?? m.tps ?? m.generation_tokens_per_sec ?? 0,
+          inflight: (fe.inflight_requests ?? 0) + (wk.requests_running ?? 0),
+          queued: (fe.queued_requests ?? 0) + (wk.requests_waiting ?? 0),
+          tps: fe.total_requests ?? 0,
         };
         histRef.current = [...histRef.current.slice(-59), point];
         setHistory([...histRef.current]);
@@ -303,13 +305,16 @@ function LiveTab({ baseUrl, token }) {
     return () => { active = false; clearInterval(id); };
   }, [baseUrl, token]);
 
+  /* FIX 4: Read from nested frontend/worker sub-objects */
   const getMetricVal = (m, key) => {
-    const maps = {
-      inflight: m.total_inflight ?? m.inflight_requests ?? m.num_requests_running ?? 0,
-      queued: m.total_queued ?? m.queued_requests ?? m.num_requests_waiting ?? 0,
-      tps: m.tokens_per_second ?? m.tps ?? m.generation_tokens_per_sec ?? 0,
-    };
-    return maps[key] ?? 0;
+    const fe = m.frontend || {};
+    const wk = m.worker || {};
+    switch (key) {
+      case "inflight": return (fe.inflight_requests ?? 0) + (wk.requests_running ?? 0);
+      case "queued": return (fe.queued_requests ?? 0) + (wk.requests_waiting ?? 0);
+      case "tps": return fe.total_requests ?? 0;
+      default: return 0;
+    }
   };
 
   const Sparkline = ({ data, key_, color }) => {
@@ -325,7 +330,7 @@ function LiveTab({ baseUrl, token }) {
         {[
           { label: "In-flight", key_: "inflight", color: T.accent, icon: "M13 10V3L4 14h7v7l9-11h-7z" },
           { label: "Queued", key_: "queued", color: T.accent2, icon: "M4 6h16M4 10h16M4 14h16M4 18h16" },
-          { label: "Tokens/sec", key_: "tps", color: T.info, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
+          { label: "Total Requests", key_: "tps", color: T.info, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
         ].map(kpi => (
           <Card key={kpi.label}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -337,38 +342,34 @@ function LiveTab({ baseUrl, token }) {
           </Card>
         ))}
       </div>
-      {metrics?.tenant_breakdown && (
-        <Card>
-          <SectionLabel>Per-Tenant Activity</SectionLabel>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Tenant","In-flight","Queued","Tokens/sec","Status"].map(h => <th key={h} style={{ textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
-            <tbody>{Object.entries(metrics.tenant_breakdown).map(([tid, td]) => (
-              <tr key={tid}>{[tid, td.inflight ?? 0, td.queued ?? 0, td.tps ?? 0].map((v, i) => <td key={i} style={{ padding: "8px 10px", borderBottom: `1px solid ${T.border}`, color: i === 0 ? T.text : T.textSec, fontWeight: i === 0 ? 600 : 400 }}>{v}</td>)}<td style={{ padding: "8px 10px", borderBottom: `1px solid ${T.border}` }}><Badge variant="success">Active</Badge></td></tr>
-            ))}</tbody>
-          </table>
-        </Card>
-      )}
       {!metrics && !error && <div style={{ textAlign: "center", padding: 40, color: T.textTert, fontSize: 13 }}>Connecting to live metrics…<br /><span style={{ fontSize: 11 }}>Polling /admin/dynamo/metrics every 3s</span></div>}
     </Anim>
   );
 }
 
-/* ═══════════════════ INFRASTRUCTURE TAB (Change 2) ═══════════════════ */
-// Added p50/p95/p99 latency, queue depth, KV cache utilization, TTFT, separate input/output TPS
+/* ═══════════════════ INFRASTRUCTURE TAB [FIX 7: correct endpoints] ═══════════════════ */
 function DynamoTab({ baseUrl, token }) {
-  const [frontend, setFrontend] = useState(null); const [worker, setWorker] = useState(null); const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState(null); const [metrics, setMetrics] = useState(null); const [loading, setLoading] = useState(true);
   useEffect(() => {
     const poll = async () => {
       try {
-        const [fe, wk] = await Promise.all([
-          apiFetch(baseUrl, "/admin/dynamo/frontend/stats", { token }).catch(() => null),
-          apiFetch(baseUrl, "/admin/dynamo/worker/stats", { token }).catch(() => null),
+        /* FIX 7: Use /admin/dynamo/status and /admin/dynamo/metrics instead of non-existent /frontend/stats, /worker/stats */
+        const [st, mt] = await Promise.all([
+          apiFetch(baseUrl, "/admin/dynamo/status", { token }).catch(() => null),
+          apiFetch(baseUrl, "/admin/dynamo/metrics", { token }).catch(() => null),
         ]);
-        setFrontend(fe); setWorker(wk); setLoading(false);
+        setStatus(st); setMetrics(mt); setLoading(false);
       } catch { setLoading(false); }
     };
     poll(); const id = setInterval(poll, 5000); return () => clearInterval(id);
   }, []);
+
+  const fe = metrics?.frontend || {};
+  const wk = metrics?.worker || {};
+  const feHealthy = status?.frontend?.healthy;
+  const wkHealthy = status?.worker?.healthy;
+  const modelCfg = status?.model_config || {};
+
   const StatRow = ({ label, value, unit, tooltip }) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: `1px solid ${T.border}` }}>
       <div>
@@ -378,7 +379,7 @@ function DynamoTab({ baseUrl, token }) {
       <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{value ?? "—"}{unit && <span style={{ fontSize: 11, fontWeight: 400, color: T.textTert, marginLeft: 3 }}>{unit}</span>}</span>
     </div>
   );
-  const pct = (v) => v != null ? `${(v * 100).toFixed(1)}%` : null;
+
   return (
     <Anim>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
@@ -389,29 +390,44 @@ function DynamoTab({ baseUrl, token }) {
               <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 3 }}>Dynamo Frontend</div>
               <div style={{ fontSize: 12, color: T.textTert }}>HTTP router · port 8001</div>
             </div>
-            <Badge variant={frontend ? "success" : "warning"}>{frontend ? "Online" : "Polling…"}</Badge>
+            <Badge variant={feHealthy ? "success" : "warning"}>{feHealthy ? "Online" : "Polling…"}</Badge>
           </div>
           <div style={{ background: T.accentLight, border: `1px solid #99f6e4`, borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: T.accent }}>
-            Routes incoming requests, manages KV store discovery, and handles request migration across workers. Think of it as the load balancer layer.
+            Routes incoming requests, manages KV store discovery, and handles request migration across workers.
           </div>
-          <StatRow label="Active Connections" value={frontend?.active_connections} tooltip="Current open HTTP connections" />
-          <StatRow label="Requests In-flight" value={frontend?.inflight_requests} tooltip="Requests currently being routed" />
-          <StatRow label="Request Migration" value={frontend?.migration_enabled ? "Enabled" : "Disabled"} tooltip="Whether requests can migrate between workers" />
-          <StatRow label="KV Store Backend" value={frontend?.kv_backend || "File"} tooltip="Discovery backend for worker coordination" />
-          <StatRow label="Network Mode" value={frontend?.network_mode || "TCP"} />
-          <StatRow label="Uptime" value={frontend?.uptime_seconds ? `${Math.floor(frontend.uptime_seconds / 60)}m` : null} />
-          <div style={{ marginTop: 14 }}>
-            <SectionLabel>Request Latency</SectionLabel>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-              {[["p50", frontend?.latency_p50_ms], ["p95", frontend?.latency_p95_ms], ["p99", frontend?.latency_p99_ms]].map(([p, v]) => (
-                <div key={p} style={{ background: T.bg, borderRadius: 8, padding: "10px", textAlign: "center", border: `1px solid ${T.border}` }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: T.textTert, textTransform: "uppercase", marginBottom: 4 }}>{p}</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: T.text }}>{v != null ? v.toFixed(0) : "—"}</div>
-                  <div style={{ fontSize: 10, color: T.textTert }}>ms</div>
-                </div>
-              ))}
+          <StatRow label="Requests In-flight" value={fe.inflight_requests} tooltip="Requests currently being routed" />
+          <StatRow label="Queued Requests" value={fe.queued_requests} tooltip="Requests waiting to be routed" />
+          <StatRow label="Total Requests" value={fe.total_requests} tooltip="Cumulative requests handled" />
+          <StatRow label="Disconnected Clients" value={fe.disconnected_clients} />
+          <StatRow label="KV Store Backend" value="File" tooltip="Discovery backend (--store-kv file)" />
+          {fe.ttft_seconds && (
+            <div style={{ marginTop: 14 }}>
+              <SectionLabel>Time to First Token</SectionLabel>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                {[["p50", fe.ttft_seconds?.p50], ["p95", fe.ttft_seconds?.p95], ["p99", fe.ttft_seconds?.p99]].map(([p, v]) => (
+                  <div key={p} style={{ background: T.bg, borderRadius: 8, padding: "10px", textAlign: "center", border: `1px solid ${T.border}` }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: T.textTert, textTransform: "uppercase", marginBottom: 4 }}>{p}</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: T.text }}>{v != null ? (v * 1000).toFixed(0) : "—"}</div>
+                    <div style={{ fontSize: 10, color: T.textTert }}>ms</div>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
+          {fe.request_duration_seconds && (
+            <div style={{ marginTop: 14 }}>
+              <SectionLabel>Request Duration</SectionLabel>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {[["p50", fe.request_duration_seconds?.p50], ["p95", fe.request_duration_seconds?.p95]].map(([p, v]) => (
+                  <div key={p} style={{ background: T.bg, borderRadius: 8, padding: "10px", textAlign: "center", border: `1px solid ${T.border}` }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: T.textTert, textTransform: "uppercase", marginBottom: 4 }}>{p}</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: T.text }}>{v != null ? (v * 1000).toFixed(0) : "—"}</div>
+                    <div style={{ fontSize: 10, color: T.textTert }}>ms</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </Card>
 
         {/* vLLM Worker */}
@@ -419,61 +435,40 @@ function DynamoTab({ baseUrl, token }) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
             <div>
               <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 3 }}>vLLM Worker</div>
-              <div style={{ fontSize: 12, color: T.textTert }}>GPU inference process · port 8081</div>
+              <div style={{ fontSize: 12, color: T.textTert }}>GPU inference process · metrics port 8081</div>
             </div>
-            <Badge variant={worker ? "success" : "warning"}>{worker ? "Online" : "Polling…"}</Badge>
+            <Badge variant={wkHealthy ? "success" : "warning"}>{wkHealthy ? "Online" : "Polling…"}</Badge>
           </div>
           <div style={{ background: T.accent2Light, border: `1px solid #c7d2fe`, borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: T.accent2 }}>
-            Loads and runs the model on GPU. Manages KV cache, tokenization, and generation. Exposes Prometheus metrics for throughput and utilization.
+            Loads and runs the model on GPU. Manages KV cache, tokenization, and generation.
           </div>
-          <StatRow label="GPU Utilization" value={worker?.gpu_utilization_pct != null ? `${worker.gpu_utilization_pct.toFixed(1)}%` : null} tooltip="Current GPU compute usage" />
-          <StatRow label="KV Cache Utilization" value={pct(worker?.kv_cache_utilization)} tooltip="Fraction of KV cache in use — high values may cause evictions" />
-          <StatRow label="Queue Depth" value={worker?.queue_depth} tooltip="Requests waiting for GPU time" />
-          <StatRow label="Running Sequences" value={worker?.num_running_seqs} tooltip="Sequences currently being generated" />
-          <div style={{ marginTop: 14 }}>
-            <SectionLabel>Throughput</SectionLabel>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-              {[
-                ["Input TPS", worker?.prompt_tokens_per_sec, "tok/s"],
-                ["Output TPS", worker?.generation_tokens_per_sec, "tok/s"],
-                ["TTFT", worker?.time_to_first_token_ms, "ms"],
-              ].map(([label, v, unit]) => (
-                <div key={label} style={{ background: T.bg, borderRadius: 8, padding: "10px", textAlign: "center", border: `1px solid ${T.border}` }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: T.textTert, textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: T.text }}>{v != null ? v.toFixed(0) : "—"}</div>
-                  <div style={{ fontSize: 10, color: T.textTert }}>{unit}</div>
-                </div>
-              ))}
+          <StatRow label="GPU KV Cache Usage" value={wk.gpu_cache_usage_percent != null ? `${wk.gpu_cache_usage_percent.toFixed(1)}%` : null} tooltip="Fraction of GPU KV cache in use" />
+          <StatRow label="CPU Cache Usage" value={wk.cpu_cache_usage_percent != null ? `${wk.cpu_cache_usage_percent.toFixed(1)}%` : null} />
+          <StatRow label="Requests Running" value={wk.requests_running} tooltip="Sequences currently being generated" />
+          <StatRow label="Requests Waiting" value={wk.requests_waiting} tooltip="Requests queued for GPU time" />
+          <StatRow label="Success Total" value={wk.request_success_total} tooltip="Cumulative successful requests" />
+          {modelCfg && Object.keys(modelCfg).length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <SectionLabel>Model Config</SectionLabel>
+              <StatRow label="Context Length" value={modelCfg.context_length} />
+              <StatRow label="KV Block Size" value={modelCfg.kv_cache_block_size} />
+              <StatRow label="Max Batched Tokens" value={modelCfg.max_num_batched_tokens} />
             </div>
-          </div>
-          <div style={{ marginTop: 14 }}>
-            <SectionLabel>Request Duration</SectionLabel>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-              {[["p50", worker?.req_duration_p50_ms], ["p95", worker?.req_duration_p95_ms], ["p99", worker?.req_duration_p99_ms]].map(([p, v]) => (
-                <div key={p} style={{ background: T.bg, borderRadius: 8, padding: "10px", textAlign: "center", border: `1px solid ${T.border}` }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: T.textTert, textTransform: "uppercase", marginBottom: 4 }}>{p}</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: T.text }}>{v != null ? v.toFixed(0) : "—"}</div>
-                  <div style={{ fontSize: 10, color: T.textTert }}>ms</div>
-                </div>
-              ))}
-            </div>
-          </div>
+          )}
         </Card>
       </div>
     </Anim>
   );
 }
 
-/* ═══════════════════ TENANTS TAB (Change 4) ═══════════════════ */
-// Added configurable parameters: rate limits, budget, model access, concurrency, region
+/* ═══════════════════ TENANTS TAB [FIX 5: correct field names] ═══════════════════ */
 function TenantsTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({
     name: "", tier: "standard",
-    max_concurrent: "", requests_per_minute: "", tokens_per_minute: "",
+    max_concurrent: "", rpm_limit: "", tpm_limit: "",
     budget_limit: "", budget_window: "month",
-    model_access: "all", region: "us-east-1",
     max_context_tokens: "", max_output_tokens: "",
   });
   const [saving, setSaving] = useState(false);
@@ -484,10 +479,10 @@ function TenantsTab({ baseUrl, token, toast }) {
 
   const TIERS = ["starter", "standard", "pro", "enterprise"];
   const PRESETS = {
-    starter:    { max_concurrent: 5,   requests_per_minute: 60,  tokens_per_minute: 50000,  max_context_tokens: 8192,  max_output_tokens: 1024 },
-    standard:   { max_concurrent: 20,  requests_per_minute: 300, tokens_per_minute: 200000, max_context_tokens: 32768, max_output_tokens: 4096 },
-    pro:        { max_concurrent: 50,  requests_per_minute: 1000, tokens_per_minute: 1000000, max_context_tokens: 131072, max_output_tokens: 8192 },
-    enterprise: { max_concurrent: 200, requests_per_minute: 5000, tokens_per_minute: 10000000, max_context_tokens: 131072, max_output_tokens: 8192 },
+    starter:    { max_concurrent: 5,   rpm_limit: 60,   tpm_limit: 50000,    max_context_tokens: 8192,   max_output_tokens: 1024 },
+    standard:   { max_concurrent: 20,  rpm_limit: 300,  tpm_limit: 200000,   max_context_tokens: 32768,  max_output_tokens: 4096 },
+    pro:        { max_concurrent: 50,  rpm_limit: 1000, tpm_limit: 1000000,  max_context_tokens: 131072, max_output_tokens: 8192 },
+    enterprise: { max_concurrent: 200, rpm_limit: 5000, tpm_limit: 10000000, max_context_tokens: 131072, max_output_tokens: 8192 },
   };
 
   const applyTier = (tier) => {
@@ -499,16 +494,26 @@ function TenantsTab({ baseUrl, token, toast }) {
     if (!form.name.trim()) { toast("Name is required", "error"); return; }
     setSaving(true);
     try {
-      // Send tenant_name (what the gateway expects) plus any numeric limits
+      /* FIX 5: Use backend field names (rpm_limit, tpm_limit) not requests_per_minute/tokens_per_minute */
       const body = { tenant_name: form.name.trim() };
-      const numFields = ["max_concurrent","requests_per_minute","tokens_per_minute","budget_limit","max_context_tokens","max_output_tokens"];
+      const numFields = ["max_concurrent", "rpm_limit", "tpm_limit", "max_context_tokens", "max_output_tokens"];
       numFields.forEach(k => { if (form[k]) body[k] = Number(form[k]); });
-      if (form.budget_limit) body.budget_window = form.budget_window;
+
       const res = await apiFetch(baseUrl, "/admin/tenants", { token, method: "POST", body });
+      const tenantId = res.tenant_id;
       const key = res.api_key || res.key || res.token;
+
+      /* FIX 5: Budget is a separate endpoint, not part of tenant creation */
+      if (form.budget_limit && tenantId) {
+        await apiFetch(baseUrl, `/admin/budgets/${tenantId}`, {
+          token, method: "PUT",
+          body: { window: form.budget_window, budget_usd: Number(form.budget_limit) }
+        }).catch(() => {}); // non-fatal
+      }
+
       setShowAdd(false);
       if (key) setRevealKey(key); else toast("Tenant created");
-      setForm({ name: "", tier: "standard", max_concurrent: "", requests_per_minute: "", tokens_per_minute: "", budget_limit: "", budget_window: "month", model_access: "all", region: "us-east-1", max_context_tokens: "", max_output_tokens: "" });
+      setForm({ name: "", tier: "standard", max_concurrent: "", rpm_limit: "", tpm_limit: "", budget_limit: "", budget_window: "month", max_context_tokens: "", max_output_tokens: "" });
       load();
     } catch (e) { toast(e.message, "error"); } finally { setSaving(false); }
   };
@@ -538,14 +543,14 @@ function TenantsTab({ baseUrl, token, toast }) {
                 </div>
               </div>
             </div>
-
             <div style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 10, padding: "14px 16px" }}>
               <SectionLabel>Rate Limits</SectionLabel>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                {/* FIX 5: Use correct backend field names */}
                 {[
                   ["Max Concurrent", "max_concurrent", "reqs"],
-                  ["Requests/min", "requests_per_minute", "rpm"],
-                  ["Tokens/min", "tokens_per_minute", "tpm"],
+                  ["Requests/min", "rpm_limit", "rpm"],
+                  ["Tokens/min", "tpm_limit", "tpm"],
                 ].map(([label, key, unit]) => (
                   <div key={key}>
                     <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>{label} <span style={{ color: T.textTert }}>({unit})</span></div>
@@ -554,14 +559,10 @@ function TenantsTab({ baseUrl, token, toast }) {
                 ))}
               </div>
             </div>
-
             <div style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 10, padding: "14px 16px" }}>
               <SectionLabel>Token Limits</SectionLabel>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                {[
-                  ["Max Context Tokens", "max_context_tokens"],
-                  ["Max Output Tokens", "max_output_tokens"],
-                ].map(([label, key]) => (
+                {[["Max Context Tokens", "max_context_tokens"], ["Max Output Tokens", "max_output_tokens"]].map(([label, key]) => (
                   <div key={key}>
                     <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>{label}</div>
                     <Input value={form[key]} onChange={v => setForm(f => ({ ...f, [key]: v }))} placeholder="—" type="number" />
@@ -569,7 +570,6 @@ function TenantsTab({ baseUrl, token, toast }) {
                 ))}
               </div>
             </div>
-
             <div style={{ background: T.bg, border: `1px solid ${T.border}`, borderRadius: 10, padding: "14px 16px" }}>
               <SectionLabel>Spend Policy</SectionLabel>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -587,23 +587,6 @@ function TenantsTab({ baseUrl, token, toast }) {
                 </div>
               </div>
             </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div>
-                <SectionLabel>Model Access</SectionLabel>
-                <Select value={form.model_access} onChange={v => setForm(f => ({ ...f, model_access: v }))}>
-                  <option value="all">All Models</option>
-                  <option value="restricted">Restricted (whitelist)</option>
-                </Select>
-              </div>
-              <div>
-                <SectionLabel>Region Tag</SectionLabel>
-                <Select value={form.region} onChange={v => setForm(f => ({ ...f, region: v }))}>
-                  {["us-east-1","us-west-2","eu-west-1","ap-southeast-1"].map(r => <option key={r} value={r}>{r}</option>)}
-                </Select>
-              </div>
-            </div>
-
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
               <Btn variant="secondary" onClick={() => setShowAdd(false)}>Cancel</Btn>
               <Btn onClick={add} disabled={saving}>{saving ? <><Spinner /> Creating…</> : "Create Tenant"}</Btn>
@@ -615,17 +598,15 @@ function TenantsTab({ baseUrl, token, toast }) {
       {loading ? <div style={{ textAlign: "center", padding: 40 }}><Spinner size={20} /></div> : (
         <Card style={{ padding: 0 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Name","ID","Tier","Region","Concurrency","RPM","Status",""].map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: `1px solid ${T.border}`, background: T.bg }}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Name", "ID", "Concurrency", "RPM", "TPM", "Status"].map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: `1px solid ${T.border}`, background: T.bg }}>{h}</th>)}</tr></thead>
             <tbody>{tenants.map(t => (
               <tr key={t.id || t.tenant_id} style={{ borderBottom: `1px solid ${T.border}` }}>
-                <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{t.name || t.tenant_name || t.display_name || t.id || "—"}</td>
-                <td style={{ padding: "10px 14px", color: T.textTert, fontFamily: "monospace", fontSize: 11 }}>{(t.id || t.tenant_id || "")?.slice(0, 12)}…</td>
-                <td style={{ padding: "10px 14px" }}><Badge variant="accent">{t.tier || "standard"}</Badge></td>
-                <td style={{ padding: "10px 14px", color: T.textSec }}>{t.region || "—"}</td>
+                <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{t.name}</td>
+                <td style={{ padding: "10px 14px", color: T.textTert, fontFamily: "monospace", fontSize: 11 }}>{(t.id || "")?.slice(0, 12)}…</td>
                 <td style={{ padding: "10px 14px", color: T.textSec }}>{t.max_concurrent ?? "—"}</td>
-                <td style={{ padding: "10px 14px", color: T.textSec }}>{t.requests_per_minute ?? "—"}</td>
-                <td style={{ padding: "10px 14px" }}><Badge variant="success">Active</Badge></td>
-                <td style={{ padding: "10px 14px" }}></td>
+                <td style={{ padding: "10px 14px", color: T.textSec }}>{t.rpm_limit ?? "—"}</td>
+                <td style={{ padding: "10px 14px", color: T.textSec }}>{t.tpm_limit ?? "—"}</td>
+                <td style={{ padding: "10px 14px" }}><Badge variant={t.is_active !== false ? "success" : "danger"}>{t.is_active !== false ? "Active" : "Inactive"}</Badge></td>
               </tr>
             ))}</tbody>
           </table>
@@ -636,16 +617,22 @@ function TenantsTab({ baseUrl, token, toast }) {
   );
 }
 
-/* ═══════════════════ KEYS TAB (Change 1) ═══════════════════ */
-// API key copy modal — persistent, explicit dismiss, copy-first UX
+/* ═══════════════════ KEYS TAB [FIX 1 & 10: correct endpoints and body] ═══════════════════ */
 function KeysTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [keys, setKeys] = useState([]);
   const [selTenant, setSelTenant] = useState(""); const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false); const [keyName, setKeyName] = useState("");
-  const [revealKey, setRevealKey] = useState(null); // Change 1: show modal instead of toast
+  const [revealKey, setRevealKey] = useState(null);
 
   const loadTenants = () => apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length && !selTenant) setSelTenant(t[0].id); }).catch(() => {});
-  const loadKeys = (tid) => { if (!tid) return; apiFetch(baseUrl, `/admin/tenants/${tid}/keys`, { token }).then(r => setKeys(normalizeKeys(r))).catch(() => setKeys([])).finally(() => setLoading(false)); };
+  /* FIX 1: Use /admin/keys?tenant_id= instead of /admin/tenants/{tid}/keys */
+  const loadKeys = (tid) => {
+    if (!tid) return;
+    apiFetch(baseUrl, `/admin/keys?tenant_id=${tid}`, { token })
+      .then(r => setKeys(normalizeKeys(r)))
+      .catch(() => setKeys([]))
+      .finally(() => setLoading(false));
+  };
   useEffect(() => { loadTenants(); }, []);
   useEffect(() => { if (selTenant) loadKeys(selTenant); }, [selTenant]);
 
@@ -654,9 +641,12 @@ function KeysTab({ baseUrl, token, toast }) {
     setCreating(true);
     try {
       const kn = keyName || `key-${Date.now()}`;
-      const res = await apiFetch(baseUrl, `/admin/tenants/${selTenant}/keys`, { token, method: "POST", body: { name: kn, key_name: kn } });
-      // Extract the key from wherever the backend puts it
-      const key = res.key || res.api_key || res.raw_key || res.token || res.data?.key || res.data?.api_key;
+      /* FIX 1 & 10: POST /admin/keys with tenant_id in body, not in URL path */
+      const res = await apiFetch(baseUrl, `/admin/keys`, {
+        token, method: "POST",
+        body: { tenant_id: selTenant, name: kn }
+      });
+      const key = res.api_key || res.key || res.raw_key || res.token;
       if (key && typeof key === "string") {
         setRevealKey(key);
       } else {
@@ -666,10 +656,14 @@ function KeysTab({ baseUrl, token, toast }) {
     } catch (e) { toast(e.message, "error"); } finally { setCreating(false); }
   };
 
+  /* FIX 1: Use POST /admin/keys/{kid}/revoke instead of DELETE */
   const revoke = async (kid) => {
     if (!confirm("Revoke this key? This cannot be undone.")) return;
-    try { await apiFetch(baseUrl, `/admin/tenants/${selTenant}/keys/${kid}`, { token, method: "DELETE" }); toast("Key revoked"); loadKeys(selTenant); }
-    catch (e) { toast(e.message, "error"); }
+    try {
+      await apiFetch(baseUrl, `/admin/keys/${kid}/revoke`, { token, method: "POST" });
+      toast("Key revoked");
+      loadKeys(selTenant);
+    } catch (e) { toast(e.message, "error"); }
   };
 
   return (
@@ -680,7 +674,7 @@ function KeysTab({ baseUrl, token, toast }) {
           <SectionLabel>Tenant</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {tenants.map(t => (
-              <button key={t.id || t.tenant_id} onClick={() => setSelTenant(t.id || t.tenant_id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === (t.id || t.tenant_id) ? T.accentLight : "none", border: `1px solid ${selTenant === (t.id || t.tenant_id) ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === (t.id || t.tenant_id) ? T.accent : T.text, fontFamily: "inherit" }}>{t.name || t.tenant_name || t.display_name || t.id}</button>
+              <button key={t.id} onClick={() => setSelTenant(t.id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === t.id ? T.accentLight : "none", border: `1px solid ${selTenant === t.id ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === t.id ? T.accent : T.text, fontFamily: "inherit" }}>{t.name}</button>
             ))}
           </div>
         </Card>
@@ -694,18 +688,18 @@ function KeysTab({ baseUrl, token, toast }) {
           </Card>
           <Card style={{ padding: 0 }}>
             <div style={{ padding: "12px 16px", borderBottom: `1px solid ${T.border}` }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>Active Keys</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>API Keys</span>
               <span style={{ fontSize: 12, color: T.textTert, marginLeft: 8 }}>({keys.length})</span>
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead><tr>{["Name","Key (masked)","Created","Last Used",""].map(h => <th key={h} style={{ textAlign: "left", padding: "8px 16px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
+              <thead><tr>{["Seat", "Role", "Created", "Revoked", ""].map(h => <th key={h} style={{ textAlign: "left", padding: "8px 16px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
               <tbody>{keys.map(k => (
                 <tr key={k.id} style={{ borderBottom: `1px solid ${T.border}` }}>
-                  <td style={{ padding: "10px 16px", fontWeight: 600, color: T.text }}>{k.name || "—"}</td>
-                  <td style={{ padding: "10px 16px", fontFamily: "monospace", color: T.textTert, fontSize: 12 }}>{k.key_prefix || k.masked || "sk-…"}</td>
+                  <td style={{ padding: "10px 16px", fontWeight: 600, color: T.text }}>{k.seat_name || k.name || "service"}</td>
+                  <td style={{ padding: "10px 16px", color: T.textSec }}>{k.role || "—"}</td>
                   <td style={{ padding: "10px 16px", color: T.textSec }}>{k.created_at ? fmtTime(k.created_at) : "—"}</td>
-                  <td style={{ padding: "10px 16px", color: T.textSec }}>{k.last_used_at ? fmtTime(k.last_used_at) : "Never"}</td>
-                  <td style={{ padding: "10px 16px" }}><Btn variant="danger" small onClick={() => revoke(k.id)}>Revoke</Btn></td>
+                  <td style={{ padding: "10px 16px" }}>{k.revoked_at ? <Badge variant="danger">Revoked</Badge> : <Badge variant="success">Active</Badge>}</td>
+                  <td style={{ padding: "10px 16px" }}>{!k.revoked_at && <Btn variant="danger" small onClick={() => revoke(k.id)}>Revoke</Btn>}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -717,52 +711,70 @@ function KeysTab({ baseUrl, token, toast }) {
   );
 }
 
-/* ═══════════════════ POLICY TAB (Changes 5 & 6) ═══════════════════ */
-// Change 5: Dynamo inference hints REMOVED — moved to infra config
-// Change 6: Budget is now a Spend Policy section within Policies
+/* ═══════════════════ POLICY TAB [FIX 6: split tenant PATCH + budget PUT] ═══════════════════ */
 function PolicyTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [selTenant, setSelTenant] = useState("");
   const [policy, setPolicy] = useState(null); const [saving, setSaving] = useState(false); const [loading, setLoading] = useState(false);
   useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
+
   useEffect(() => {
     if (!selTenant) return; setLoading(true);
+    /* FIX 6: Use correct backend field names (rpm_limit, tpm_limit) */
     const extractPolicy = (t) => ({
       max_concurrent: t.max_concurrent ?? "",
-      requests_per_minute: t.requests_per_minute ?? t.rpm_limit ?? "",
-      tokens_per_minute: t.tokens_per_minute ?? t.tpm_limit ?? "",
+      rpm_limit: t.rpm_limit ?? "",
+      tpm_limit: t.tpm_limit ?? "",
       max_context_tokens: t.max_context_tokens ?? "",
       max_output_tokens: t.max_output_tokens ?? "",
-      budget_limit: t.budget_limit ?? "", budget_window: t.budget_window ?? "month",
-      budget_alert_threshold: t.budget_alert_threshold ?? "80",
+      budget_limit: "", budget_window: "month",
+      budget_alert_threshold: "80",
     });
-    // Try single-tenant endpoint, fall back to finding tenant from list
+    /* FIX 6: Use the new GET /admin/tenants/{id} endpoint (added to backend) */
     apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token })
       .then(t => setPolicy(extractPolicy(t)))
       .catch(() => {
         const found = tenants.find(t => t.id === selTenant);
-        if (found) setPolicy(extractPolicy(found));
-        else setPolicy({ max_concurrent: "", requests_per_minute: "", tokens_per_minute: "", max_context_tokens: "", max_output_tokens: "", budget_limit: "", budget_window: "month", budget_alert_threshold: "80" });
+        setPolicy(found ? extractPolicy(found) : { max_concurrent: "", rpm_limit: "", tpm_limit: "", max_context_tokens: "", max_output_tokens: "", budget_limit: "", budget_window: "month", budget_alert_threshold: "80" });
       })
       .finally(() => setLoading(false));
+    /* FIX 6: Fetch budget separately from /admin/budgets?tenant_id= */
+    apiFetch(baseUrl, `/admin/budgets?tenant_id=${selTenant}`, { token })
+      .then(r => {
+        const budgets = r.data || [];
+        if (budgets.length > 0) {
+          setPolicy(p => p ? { ...p, budget_limit: budgets[0].budget_usd || "", budget_window: budgets[0].window || "month" } : p);
+        }
+      }).catch(() => {});
   }, [selTenant, tenants]);
 
+  /* FIX 6: Split save into tenant PATCH + budget PUT */
   const save = async () => {
     setSaving(true);
     try {
-      const body = {};
-      Object.entries(policy).forEach(([k, v]) => { if (v !== "") body[k] = isNaN(v) ? v : Number(v); });
-      // Also send backend-native field names if they differ
-      if (body.requests_per_minute != null) body.rpm_limit = body.requests_per_minute;
-      if (body.tokens_per_minute != null) body.tpm_limit = body.tokens_per_minute;
-      await apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token, method: "PATCH", body });
+      const tenantBody = {};
+      if (policy.max_concurrent !== "") tenantBody.max_concurrent = Number(policy.max_concurrent);
+      if (policy.rpm_limit !== "") tenantBody.rpm_limit = Number(policy.rpm_limit);
+      if (policy.tpm_limit !== "") tenantBody.tpm_limit = Number(policy.tpm_limit);
+      if (policy.max_context_tokens !== "") tenantBody.max_context_tokens = Number(policy.max_context_tokens);
+      if (policy.max_output_tokens !== "") tenantBody.max_output_tokens = Number(policy.max_output_tokens);
+
+      if (Object.keys(tenantBody).length > 0) {
+        await apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token, method: "PATCH", body: tenantBody });
+      }
+      if (policy.budget_limit) {
+        await apiFetch(baseUrl, `/admin/budgets/${selTenant}`, {
+          token, method: "PUT",
+          body: { window: policy.budget_window, budget_usd: Number(policy.budget_limit) }
+        });
+      }
       toast("Policy saved");
     } catch (e) { toast(e.message, "error"); } finally { setSaving(false); }
   };
 
   const PRESETS = [
-    { label: "Conservative", max_concurrent: 5, requests_per_minute: 60, tokens_per_minute: 50000, max_context_tokens: 8192, max_output_tokens: 1024 },
-    { label: "Standard", max_concurrent: 20, requests_per_minute: 300, tokens_per_minute: 200000, max_context_tokens: 32768, max_output_tokens: 4096 },
-    { label: "Pro", max_concurrent: 50, requests_per_minute: 1000, tokens_per_minute: 1000000, max_context_tokens: 131072, max_output_tokens: 8192 },
+    { label: "Conservative", max_concurrent: 5, rpm_limit: 60, tpm_limit: 50000, max_context_tokens: 8192, max_output_tokens: 1024 },
+    { label: "Standard", max_concurrent: 20, rpm_limit: 300, tpm_limit: 200000, max_context_tokens: 32768, max_output_tokens: 4096 },
+    { label: "Pro", max_concurrent: 50, rpm_limit: 1000, tpm_limit: 1000000, max_context_tokens: 131072, max_output_tokens: 8192 },
   ];
 
   const Field = ({ label, key_, unit }) => (
@@ -779,34 +791,29 @@ function PolicyTab({ baseUrl, token, toast }) {
           <SectionLabel>Tenant</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {tenants.map(t => (
-              <button key={t.id || t.tenant_id} onClick={() => setSelTenant(t.id || t.tenant_id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === (t.id || t.tenant_id) ? T.accentLight : "none", border: `1px solid ${selTenant === (t.id || t.tenant_id) ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === (t.id || t.tenant_id) ? T.accent : T.text, fontFamily: "inherit" }}>{t.name || t.tenant_name || t.display_name || t.id}</button>
+              <button key={t.id} onClick={() => setSelTenant(t.id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === t.id ? T.accentLight : "none", border: `1px solid ${selTenant === t.id ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === t.id ? T.accent : T.text, fontFamily: "inherit" }}>{t.name}</button>
             ))}
           </div>
         </Card>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {loading ? <div style={{ textAlign: "center", padding: 40 }}><Spinner size={18} /></div> : policy && (
             <>
-              {/* Presets */}
               <Card>
                 <SectionLabel>Presets</SectionLabel>
                 <div style={{ display: "flex", gap: 8 }}>
                   {PRESETS.map(p => (
-                    <Btn key={p.label} variant="secondary" small onClick={() => setPolicy(prev => ({ ...prev, max_concurrent: p.max_concurrent, requests_per_minute: p.requests_per_minute, tokens_per_minute: p.tokens_per_minute, max_context_tokens: p.max_context_tokens, max_output_tokens: p.max_output_tokens }))}>{p.label}</Btn>
+                    <Btn key={p.label} variant="secondary" small onClick={() => setPolicy(prev => ({ ...prev, max_concurrent: p.max_concurrent, rpm_limit: p.rpm_limit, tpm_limit: p.tpm_limit, max_context_tokens: p.max_context_tokens, max_output_tokens: p.max_output_tokens }))}>{p.label}</Btn>
                   ))}
                 </div>
               </Card>
-
-              {/* Rate Limits */}
               <Card>
                 <SectionLabel>Rate Limits</SectionLabel>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
                   <Field label="Max Concurrent" key_="max_concurrent" unit="reqs" />
-                  <Field label="Requests/min" key_="requests_per_minute" unit="rpm" />
-                  <Field label="Tokens/min" key_="tokens_per_minute" unit="tpm" />
+                  <Field label="Requests/min" key_="rpm_limit" unit="rpm" />
+                  <Field label="Tokens/min" key_="tpm_limit" unit="tpm" />
                 </div>
               </Card>
-
-              {/* Token Limits */}
               <Card>
                 <SectionLabel>Token Limits</SectionLabel>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -814,12 +821,8 @@ function PolicyTab({ baseUrl, token, toast }) {
                   <Field label="Max Output Tokens" key_="max_output_tokens" />
                 </div>
               </Card>
-
-              {/* Change 6: Spend Policy merged into Policies tab */}
               <Card>
-                <div style={{ display: "flex", justify: "space-between", alignItems: "center", marginBottom: 12 }}>
-                  <SectionLabel>Spend Policy</SectionLabel>
-                </div>
+                <SectionLabel>Spend Policy</SectionLabel>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
                   <div>
                     <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Budget Cap ($)</div>
@@ -850,7 +853,6 @@ function PolicyTab({ baseUrl, token, toast }) {
                   </div>
                 )}
               </Card>
-
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
                 <Btn onClick={save} disabled={saving}>{saving ? <><Spinner /> Saving…</> : "Save Policy"}</Btn>
               </div>
@@ -862,8 +864,7 @@ function PolicyTab({ baseUrl, token, toast }) {
   );
 }
 
-/* ═══════════════════ AUDIT TAB (Change 7) ═══════════════════ */
-// Change 7: Split into "Inference Runs" and "Admin Log" sub-tabs
+/* ═══════════════════ AUDIT TAB [FIX 3: single /admin/audit endpoint] ═══════════════════ */
 function AuditTab({ baseUrl, token }) {
   const [subTab, setSubTab] = useState("runs");
   const [logs, setLogs] = useState([]); const [loading, setLoading] = useState(true);
@@ -873,9 +874,8 @@ function AuditTab({ baseUrl, token }) {
   useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => setTenants(normalizeTenants(r))).catch(() => {}); }, []);
   useEffect(() => {
     setLoading(true);
-    const path = subTab === "runs"
-      ? `/admin/audit/runs?window=${filterWindow}${filterTenant ? `&tenant_id=${filterTenant}` : ""}`
-      : `/admin/audit/admin?window=${filterWindow}${filterTenant ? `&tenant_id=${filterTenant}` : ""}`;
+    /* FIX 3: Use single /admin/audit endpoint — no /runs or /admin sub-paths */
+    const path = `/admin/audit?window=${filterWindow}${filterTenant ? `&tenant_id=${filterTenant}` : ""}`;
     apiFetch(baseUrl, path, { token }).then(r => {
       const arr = Array.isArray(r) ? r : (r.data || r.runs || r.logs || r.events || r.items || []);
       setLogs(arr);
@@ -883,20 +883,20 @@ function AuditTab({ baseUrl, token }) {
   }, [subTab, filterTenant, filterWindow]);
 
   const actionColors = {
-    create: "success", created: "success", update: "info", updated: "info", patch: "info",
-    delete: "danger", deleted: "danger", revoke: "danger", revoked: "danger",
-    budget: "warning", budget_exceeded: "warning", budget_alert: "warning",
-    login: "accent", connect: "accent",
+    tenant_create: "success", seat_create: "success", key_create: "success", budget_set: "success",
+    tenant_update_limits: "info", seat_update: "info", budget_update: "info",
+    seat_activated: "success", seat_deactivated: "warning",
+    key_revoke: "danger",
+    profile_viewed: "accent", profile_generated: "accent",
   };
-  const getVariant = (action = "") => actionColors[action.toLowerCase()] || "default";
+  const getVariant = (action = "") => actionColors[action] || "default";
 
   return (
     <Anim>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div style={{ display: "flex", gap: 0, border: `1px solid ${T.border}`, borderRadius: 9, overflow: "hidden" }}>
           {[
-            { id: "runs", label: "Inference Runs", icon: "M13 10V3L4 14h7v7l9-11h-7z" },
-            { id: "admin", label: "Admin Changes", icon: "M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" },
+            { id: "runs", label: "All Events", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" },
           ].map(s => (
             <button key={s.id} onClick={() => setSubTab(s.id)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 14px", fontSize: 13, fontWeight: 600, border: "none", background: subTab === s.id ? T.accent : T.card, color: subTab === s.id ? "#fff" : T.textSec, cursor: "pointer", fontFamily: "inherit" }}>
               <SVG d={s.icon} size={13} color={subTab === s.id ? "#fff" : T.textSec} /> {s.label}
@@ -909,58 +909,38 @@ function AuditTab({ baseUrl, token }) {
             {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </Select>
           <Select value={filterWindow} onChange={setFilterWindow}>
-            {["1h","6h","24h","7d","30d"].map(w => <option key={w} value={w}>{w}</option>)}
+            {["1h", "24h", "7d"].map(w => <option key={w} value={w}>{w}</option>)}
           </Select>
         </div>
       </div>
 
-      {subTab === "runs" && (
-        <div style={{ marginBottom: 12, background: T.infoBg, border: `1px solid ${T.infoBorder}`, borderRadius: 8, padding: "8px 14px", fontSize: 12, color: T.info }}>
-          High-volume per-request logs. Use for debugging latency, tracing individual requests, and per-tenant usage attribution.
-        </div>
-      )}
-      {subTab === "admin" && (
-        <div style={{ marginBottom: 12, background: T.warningBg, border: `1px solid ${T.warningBorder}`, borderRadius: 8, padding: "8px 14px", fontSize: 12, color: T.warning }}>
-          Low-volume, high-importance log of all admin actions — tenant changes, key revocations, policy updates. Maps directly to SOC 2 change management requirements.
-        </div>
-      )}
+      <div style={{ marginBottom: 12, background: T.infoBg, border: `1px solid ${T.infoBorder}`, borderRadius: 8, padding: "8px 14px", fontSize: 12, color: T.info }}>
+        Admin audit log — tenant changes, key revocations, policy updates, profile views. Maps directly to SOC 2 change management requirements.
+      </div>
 
       <Card style={{ padding: 0 }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr>
-              {(subTab === "runs"
-                ? ["Time","Tenant","Request ID","Model","Tokens","Duration","Status"]
-                : ["Time","Actor","Action","Target","Details",""]
-              ).map(h => <th key={h} style={{ textAlign: "left", padding: "9px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}
+              {["Time", "Admin", "Action", "Resource", "Resource ID", "Request ID"].map(h =>
+                <th key={h} style={{ textAlign: "left", padding: "9px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>
+              )}
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} style={{ textAlign: "center", padding: 32, color: T.textTert }}><Spinner size={18} /></td></tr>
+              <tr><td colSpan={6} style={{ textAlign: "center", padding: 32, color: T.textTert }}><Spinner size={18} /></td></tr>
             ) : logs.length === 0 ? (
-              <tr><td colSpan={7} style={{ textAlign: "center", padding: 32, color: T.textTert, fontSize: 13 }}>No {subTab === "runs" ? "inference runs" : "admin changes"} in this window</td></tr>
+              <tr><td colSpan={6} style={{ textAlign: "center", padding: 32, color: T.textTert, fontSize: 13 }}>No audit events in this window</td></tr>
             ) : logs.map((log, i) => (
-              subTab === "runs" ? (
-                <tr key={i} style={{ borderBottom: `1px solid ${T.border}` }}>
-                  <td style={{ padding: "9px 14px", color: T.textSec, fontSize: 11 }}>{fmtTime(log.ts || log.timestamp)}</td>
-                  <td style={{ padding: "9px 14px", fontWeight: 600, color: T.text }}>{log.tenant_name || log.tenant_id || "—"}</td>
-                  <td style={{ padding: "9px 14px", fontFamily: "monospace", color: T.textTert, fontSize: 11 }}>{(log.request_id || "—").slice(0, 12)}</td>
-                  <td style={{ padding: "9px 14px", color: T.textSec }}>{log.model || "—"}</td>
-                  <td style={{ padding: "9px 14px", color: T.textSec }}>{log.total_tokens ?? "—"}</td>
-                  <td style={{ padding: "9px 14px", color: T.textSec }}>{log.duration_ms != null ? `${log.duration_ms}ms` : "—"}</td>
-                  <td style={{ padding: "9px 14px" }}><Badge variant={log.error ? "danger" : "success"}>{log.error ? "Error" : "OK"}</Badge></td>
-                </tr>
-              ) : (
-                <tr key={i} style={{ borderBottom: `1px solid ${T.border}` }}>
-                  <td style={{ padding: "9px 14px", color: T.textSec, fontSize: 11 }}>{fmtTime(log.ts || log.timestamp)}</td>
-                  <td style={{ padding: "9px 14px", fontWeight: 600, color: T.text }}>{log.actor || "admin"}</td>
-                  <td style={{ padding: "9px 14px" }}><Badge variant={getVariant(log.action)}>{log.action}</Badge></td>
-                  <td style={{ padding: "9px 14px", color: T.textSec }}>{log.target_type || "—"}</td>
-                  <td style={{ padding: "9px 14px", color: T.textTert, fontSize: 12, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{log.details || log.description || "—"}</td>
-                  <td style={{ padding: "9px 14px" }}></td>
-                </tr>
-              )
+              <tr key={log.event_id || i} style={{ borderBottom: `1px solid ${T.border}` }}>
+                <td style={{ padding: "9px 14px", color: T.textSec, fontSize: 11 }}>{fmtTime(log.ts)}</td>
+                <td style={{ padding: "9px 14px", fontWeight: 600, color: T.text }}>{log.admin_identity || "—"}</td>
+                <td style={{ padding: "9px 14px" }}><Badge variant={getVariant(log.action)}>{log.action}</Badge></td>
+                <td style={{ padding: "9px 14px", color: T.textSec }}>{log.resource_type || "—"}</td>
+                <td style={{ padding: "9px 14px", color: T.textTert, fontFamily: "monospace", fontSize: 11 }}>{(log.resource_id || "—").slice(0, 16)}</td>
+                <td style={{ padding: "9px 14px", color: T.textTert, fontFamily: "monospace", fontSize: 11 }}>{(log.request_id || "—").slice(0, 12)}</td>
+              </tr>
             ))}
           </tbody>
         </table>
@@ -969,53 +949,76 @@ function AuditTab({ baseUrl, token }) {
   );
 }
 
-/* ═══════════════════ USAGE TAB ═══════════════════ */
+/* ═══════════════════ USAGE TAB [FIX 2: use /admin/usage/tenants aggregate] ═══════════════════ */
 function UsageTab({ baseUrl, token }) {
-  const [tenants, setTenants] = useState([]); const [usage, setUsage] = useState({}); const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState([]); const [loading, setLoading] = useState(true);
+  const [window_, setWindow_] = useState("24h");
+  const [costEnabled, setCostEnabled] = useState(false);
+
   useEffect(() => {
-    apiFetch(baseUrl, "/admin/tenants", { token }).then(async r => {
-      const ts = normalizeTenants(r);
-      setTenants(ts);
-      const entries = await Promise.all(ts.map(t => apiFetch(baseUrl, `/admin/tenants/${t.id}/usage`, { token }).then(u => [t.id, u]).catch(() => [t.id, {}])));
-      setUsage(Object.fromEntries(entries)); setLoading(false);
-    }).catch(() => setLoading(false));
-  }, []);
+    setLoading(true);
+    /* FIX 2: Use aggregate /admin/usage/tenants?window= instead of per-tenant calls */
+    apiFetch(baseUrl, `/admin/usage/tenants?window=${window_}`, { token })
+      .then(r => {
+        setRows(r.data || []);
+        setCostEnabled(r.cost_estimation_enabled || false);
+      })
+      .catch(() => setRows([]))
+      .finally(() => setLoading(false));
+  }, [window_]);
+
   return (
     <Anim>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text }}>Tenant Usage</h2>
+        <Select value={window_} onChange={setWindow_}>
+          {["1h", "24h", "7d"].map(w => <option key={w} value={w}>{w}</option>)}
+        </Select>
+      </div>
       {loading ? <div style={{ textAlign: "center", padding: 40 }}><Spinner size={20} /></div> : (
         <Card style={{ padding: 0 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Tenant","Total Requests","Prompt Tokens","Completion Tokens","Total Cost","Last Activity"].map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
-            <tbody>{tenants.map(t => { const u = usage[t.id] || {}; return (
-              <tr key={t.id} style={{ borderBottom: `1px solid ${T.border}` }}>
-                <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{t.name}</td>
-                <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.total_requests || 0).toLocaleString()}</td>
+            <thead><tr>{["Tenant", "Requests", "Errors", "Prompt Tokens", "Completion Tokens", "p95 Latency", costEnabled ? "Cost Est" : null].filter(Boolean).map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", background: T.bg, borderBottom: `1px solid ${T.border}` }}>{h}</th>)}</tr></thead>
+            <tbody>{rows.map(u => (
+              <tr key={u.tenant_id} style={{ borderBottom: `1px solid ${T.border}` }}>
+                <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{u.tenant_name || u.tenant_id}</td>
+                <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.requests || 0).toLocaleString()}</td>
+                <td style={{ padding: "10px 14px", color: u.errors > 0 ? T.danger : T.textSec }}>{u.errors || 0}</td>
                 <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.prompt_tokens || 0).toLocaleString()}</td>
                 <td style={{ padding: "10px 14px", color: T.textSec }}>{(u.completion_tokens || 0).toLocaleString()}</td>
-                <td style={{ padding: "10px 14px", color: T.text, fontWeight: 600 }}>${(u.total_cost || 0).toFixed(4)}</td>
-                <td style={{ padding: "10px 14px", color: T.textTert, fontSize: 11 }}>{u.last_request_at ? fmtTime(u.last_request_at) : "Never"}</td>
+                <td style={{ padding: "10px 14px", color: T.textSec }}>{u.p95_latency_ms ? `${u.p95_latency_ms}ms` : "—"}</td>
+                {costEnabled && <td style={{ padding: "10px 14px", color: T.text, fontWeight: 600 }}>${(u.cost_est_sum || 0).toFixed(4)}</td>}
               </tr>
-            ); })}</tbody>
+            ))}</tbody>
           </table>
-          {tenants.length === 0 && <div style={{ textAlign: "center", padding: "28px 0", color: T.textTert, fontSize: 13 }}>No usage data yet</div>}
+          {rows.length === 0 && <div style={{ textAlign: "center", padding: "28px 0", color: T.textTert, fontSize: 13 }}>No usage data in this window</div>}
         </Card>
       )}
     </Anim>
   );
 }
 
-/* ═══════════════════ TEST TAB ═══════════════════ */
-function TestTab({ baseUrl, toast }) {
+/* ═══════════════════ TEST TAB [FIX 9: pass token to admin calls] ═══════════════════ */
+function TestTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [selTenant, setSelTenant] = useState("");
   const [keys, setKeys] = useState([]); const [selKey, setSelKey] = useState("");
   const [prompt, setPrompt] = useState("Explain enterprise AI governance in 3 sentences."); const [result, setResult] = useState(null); const [loading, setLoading] = useState(false);
-  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", {}).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
-  useEffect(() => { if (selTenant) apiFetch(baseUrl, `/admin/tenants/${selTenant}/keys`, {}).then(r => { const k = normalizeKeys(r); setKeys(k); if (k.length) setSelKey(k[0].id); }).catch(() => setKeys([])); }, [selTenant]);
+  /* FIX 9: Pass token to admin API calls */
+  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
+  /* FIX 9: Use correct keys endpoint with token */
+  useEffect(() => { if (selTenant) apiFetch(baseUrl, `/admin/keys?tenant_id=${selTenant}`, { token }).then(r => { const k = normalizeKeys(r); setKeys(k); if (k.length) setSelKey(k[0].id); }).catch(() => setKeys([])); }, [selTenant]);
+
   const run = async () => {
     setLoading(true); setResult(null);
     try {
-      const apiKey = keys.find(k => k.id === selKey)?.raw_key || selKey;
-      const res = await fetch(`${baseUrl}/v1/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` }, body: JSON.stringify({ model: "default", messages: [{ role: "user", content: prompt }], max_tokens: 256 }) });
+      // For the test tab, we need to use the actual API key value, not the key_id.
+      // Since the backend only returns key_id (the raw key is shown once at creation),
+      // the user should paste an API key. Use selKey as a raw bearer token.
+      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${selKey}` },
+        body: JSON.stringify({ model: "default", messages: [{ role: "user", content: prompt }], max_tokens: 256 })
+      });
       const data = await res.json(); setResult(data);
     } catch (e) { toast(e.message, "error"); } finally { setLoading(false); }
   };
@@ -1025,7 +1028,10 @@ function TestTab({ baseUrl, toast }) {
         <SectionLabel>Test Inference</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div><SectionLabel>Tenant</SectionLabel><Select value={selTenant} onChange={setSelTenant} style={{ width: "100%" }}>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</Select></div>
-          <div><SectionLabel>API Key</SectionLabel><Select value={selKey} onChange={setSelKey} style={{ width: "100%" }}>{keys.map(k => <option key={k.id} value={k.id}>{k.name || k.id}</option>)}</Select></div>
+          <div>
+            <SectionLabel>API Key (paste raw key)</SectionLabel>
+            <Input value={selKey} onChange={setSelKey} placeholder="cp_…" />
+          </div>
         </div>
         <div><SectionLabel>Prompt</SectionLabel><textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={4} style={{ width: "100%", padding: "9px 11px", fontSize: 13, border: `1px solid ${T.border}`, borderRadius: 8, outline: "none", resize: "vertical", fontFamily: "inherit", color: T.text, background: T.bg, boxSizing: "border-box" }} /></div>
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -1075,7 +1081,7 @@ export default function App() {
         {tab === "policy"     && <PolicyTab baseUrl={baseUrl} token={token} toast={toast} />}
         {tab === "audit"      && <AuditTab baseUrl={baseUrl} token={token} />}
         {tab === "usage"      && <UsageTab baseUrl={baseUrl} token={token} />}
-        {tab === "test"       && <TestTab baseUrl={baseUrl} toast={toast} />}
+        {tab === "test"       && <TestTab baseUrl={baseUrl} token={token} toast={toast} />}
       </main>
       {toastMsg && <Toast message={toastMsg.msg} type={toastMsg.type} onDone={() => setToastMsg(null)} />}
       <style>{`

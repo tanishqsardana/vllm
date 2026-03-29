@@ -696,6 +696,8 @@ async def gateway_version() -> GatewayVersion:
         metrics_enabled=settings.metrics_enabled,
         admin_auth_mode=settings.admin_auth_mode,
         profiles_enabled=settings.profiles_enabled,
+        global_max_concurrent=settings.global_max_concurrent,
+        gpu_hourly_rate=settings.gpu_hourly_rate,
     )
 
 
@@ -808,7 +810,19 @@ async def list_tenants(request: Request) -> dict[str, list[TenantPublic]]:
     tenants = [TenantPublic(**row) for row in db.list_tenants()]
     return {"data": tenants}
 
+@app.get("/admin/tenants/{tenant_id}", response_model=TenantPublic)
+async def get_tenant_by_id(tenant_id: str, request: Request) -> TenantPublic:
+    await _check_admin(request)
 
+    db: Database = app.state.db
+    tenant = db.get_tenant(tenant_id)
+    if tenant is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"type": "not_found", "message": "tenant not found"}},
+        )
+    return TenantPublic(**tenant)
+    
 @app.patch("/admin/tenants/{tenant_id}", response_model=TenantPublic)
 async def patch_tenant(
     tenant_id: str,

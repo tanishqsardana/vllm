@@ -184,6 +184,8 @@ class GatewayVersion(BaseModel):
     metrics_enabled: bool
     admin_auth_mode: Literal["static_token", "oidc"]
     profiles_enabled: bool
+    global_max_concurrent: int = 0
+    gpu_hourly_rate: float = 0.0
 
 
 class AuthRequirements(BaseModel):
