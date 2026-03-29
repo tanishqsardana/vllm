@@ -26,11 +26,40 @@ async function apiFetch(baseUrl, path, { token, method = "GET", body } = {}) {
   const res = await fetch(`${baseUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
-    try { const j = await res.json(); msg = j.detail || j.error || msg; } catch {}
+    try {
+      const j = await res.json();
+      const raw = j.detail || j.error || j.message || msg;
+      msg = typeof raw === "string" ? raw : JSON.stringify(raw);
+    } catch {}
     throw new Error(msg);
   }
   if (res.status === 204) return {};
   return res.json();
+}
+
+/* ═══════════════════ HELPERS ═══════════════════ */
+function normalizeTenants(raw) {
+  let arr;
+  if (Array.isArray(raw)) arr = raw;
+  else if (raw?.tenants) arr = raw.tenants;
+  else if (raw?.items) arr = raw.items;
+  else if (raw?.data) arr = raw.data;
+  else arr = [];
+  // Normalize: ensure every tenant has .id and .name regardless of backend field names
+  return arr.map(t => ({
+    ...t,
+    id: t.id || t.tenant_id,
+    name: t.name || t.tenant_name || t.display_name || t.id || t.tenant_id || "—",
+  }));
+}
+function normalizeKeys(raw) {
+  let arr;
+  if (Array.isArray(raw)) arr = raw;
+  else if (raw?.keys) arr = raw.keys;
+  else if (raw?.items) arr = raw.items;
+  else if (raw?.data) arr = raw.data;
+  else arr = [];
+  return arr.map(k => ({ ...k, id: k.id || k.key_id }));
 }
 
 /* ═══════════════════ TABS ═══════════════════ */
@@ -186,7 +215,8 @@ function OverviewTab({ baseUrl, token }) {
     Promise.all([
       apiFetch(baseUrl, "/admin/tenants", { token }).catch(() => []),
       apiFetch(baseUrl, "/version").catch(() => ({})),
-    ]).then(([tenants, version]) => {
+    ]).then(([tenantsRaw, version]) => {
+      const tenants = normalizeTenants(tenantsRaw);
       const usage = {
         total_requests: tenants.reduce((s, t) => s + (t.total_requests || 0), 0),
         total_tokens: tenants.reduce((s, t) => s + (t.total_tokens || 0), 0),
@@ -251,38 +281,58 @@ function OverviewTab({ baseUrl, token }) {
 /* ═══════════════════ LIVE TAB ═══════════════════ */
 function LiveTab({ baseUrl, token }) {
   const [metrics, setMetrics] = useState(null); const [history, setHistory] = useState([]); const histRef = useRef([]);
+  const [error, setError] = useState(null);
   useEffect(() => {
+    let active = true;
     const poll = async () => {
       try {
         const m = await apiFetch(baseUrl, "/admin/dynamo/metrics", { token });
-        setMetrics(m);
-        const point = { t: Date.now(), inflight: m.total_inflight || 0, queued: m.total_queued || 0, tps: m.tokens_per_second || 0 };
+        if (!active) return;
+        setMetrics(m); setError(null);
+        const point = {
+          t: Date.now(),
+          inflight: m.total_inflight ?? m.inflight_requests ?? m.num_requests_running ?? 0,
+          queued: m.total_queued ?? m.queued_requests ?? m.num_requests_waiting ?? 0,
+          tps: m.tokens_per_second ?? m.tps ?? m.generation_tokens_per_sec ?? 0,
+        };
         histRef.current = [...histRef.current.slice(-59), point];
         setHistory([...histRef.current]);
-      } catch {}
+      } catch (e) { if (active) setError(e.message); }
     };
-    poll(); const id = setInterval(poll, 3000); return () => clearInterval(id);
-  }, []);
+    poll(); const id = setInterval(poll, 3000);
+    return () => { active = false; clearInterval(id); };
+  }, [baseUrl, token]);
+
+  const getMetricVal = (m, key) => {
+    const maps = {
+      inflight: m.total_inflight ?? m.inflight_requests ?? m.num_requests_running ?? 0,
+      queued: m.total_queued ?? m.queued_requests ?? m.num_requests_waiting ?? 0,
+      tps: m.tokens_per_second ?? m.tps ?? m.generation_tokens_per_sec ?? 0,
+    };
+    return maps[key] ?? 0;
+  };
+
   const Sparkline = ({ data, key_, color }) => {
     if (data.length < 2) return <div style={{ height: 36, background: T.bg, borderRadius: 6 }} />;
-    const vals = data.map(d => d[key_]); const max = Math.max(...vals, 1);
+    const vals = data.map(d => d[key_] ?? 0); const max = Math.max(...vals, 1);
     const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * 200},${36 - (v / max) * 34}`).join(" ");
     return <svg viewBox={`0 0 200 36`} style={{ width: "100%", height: 36 }}><polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} /><polyline points={`0,36 ${pts} 200,36`} fill={color + "20"} stroke="none" /></svg>;
   };
   return (
     <Anim>
+      {error && <div style={{ background: T.warningBg, border: `1px solid ${T.warningBorder}`, borderRadius: 8, padding: "8px 14px", fontSize: 12, color: T.warning, marginBottom: 14 }}>Metrics endpoint error: {error} — retrying every 3s</div>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 20 }}>
         {[
-          { label: "In-flight", key_: "total_inflight", color: T.accent, icon: "M13 10V3L4 14h7v7l9-11h-7z" },
-          { label: "Queued", key_: "total_queued", color: T.accent2, icon: "M4 6h16M4 10h16M4 14h16M4 18h16" },
+          { label: "In-flight", key_: "inflight", color: T.accent, icon: "M13 10V3L4 14h7v7l9-11h-7z" },
+          { label: "Queued", key_: "queued", color: T.accent2, icon: "M4 6h16M4 10h16M4 14h16M4 18h16" },
           { label: "Tokens/sec", key_: "tps", color: T.info, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
         ].map(kpi => (
           <Card key={kpi.label}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>{kpi.label}</span>
-              <div style={{ display: "flex", gap: 4, alignItems: "center" }}><div style={{ width: 6, height: 6, borderRadius: "50%", background: T.success, animation: "pulse 2s infinite" }} /><span style={{ fontSize: 10, color: T.textTert }}>LIVE</span></div>
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}><div style={{ width: 6, height: 6, borderRadius: "50%", background: metrics ? T.success : T.warning, animation: "pulse 2s infinite" }} /><span style={{ fontSize: 10, color: T.textTert }}>{metrics ? "LIVE" : "…"}</span></div>
             </div>
-            <div style={{ fontSize: 28, fontWeight: 700, color: T.text, marginBottom: 8 }}>{metrics ? (metrics[kpi.key_] ?? 0) : "—"}</div>
+            <div style={{ fontSize: 28, fontWeight: 700, color: T.text, marginBottom: 8 }}>{metrics ? getMetricVal(metrics, kpi.key_) : "—"}</div>
             <Sparkline data={history} key_={kpi.key_} color={kpi.color} />
           </Card>
         ))}
@@ -298,7 +348,7 @@ function LiveTab({ baseUrl, token }) {
           </table>
         </Card>
       )}
-      {!metrics && <div style={{ textAlign: "center", padding: 40, color: T.textTert, fontSize: 13 }}>Connecting to live metrics…<br /><span style={{ fontSize: 11 }}>Polling /admin/dynamo/metrics every 3s</span></div>}
+      {!metrics && !error && <div style={{ textAlign: "center", padding: 40, color: T.textTert, fontSize: 13 }}>Connecting to live metrics…<br /><span style={{ fontSize: 11 }}>Polling /admin/dynamo/metrics every 3s</span></div>}
     </Anim>
   );
 }
@@ -427,8 +477,9 @@ function TenantsTab({ baseUrl, token, toast }) {
     max_context_tokens: "", max_output_tokens: "",
   });
   const [saving, setSaving] = useState(false);
+  const [revealKey, setRevealKey] = useState(null);
 
-  const load = () => apiFetch(baseUrl, "/admin/tenants", { token }).then(setTenants).catch(() => {}).finally(() => setLoading(false));
+  const load = () => apiFetch(baseUrl, "/admin/tenants", { token }).then(r => setTenants(normalizeTenants(r))).catch(() => {}).finally(() => setLoading(false));
   useEffect(() => { load(); }, []);
 
   const TIERS = ["starter", "standard", "pro", "enterprise"];
@@ -448,12 +499,15 @@ function TenantsTab({ baseUrl, token, toast }) {
     if (!form.name.trim()) { toast("Name is required", "error"); return; }
     setSaving(true);
     try {
-      const body = { name: form.name.trim(), tier: form.tier, region: form.region, model_access: form.model_access };
-      const nums = ["max_concurrent","requests_per_minute","tokens_per_minute","budget_limit","max_context_tokens","max_output_tokens"];
-      nums.forEach(k => { if (form[k]) body[k] = Number(form[k]); });
-      if (form.budget_limit) { body.budget_window = form.budget_window; }
-      await apiFetch(baseUrl, "/admin/tenants", { token, method: "POST", body });
-      toast("Tenant created"); setShowAdd(false);
+      // Send tenant_name (what the gateway expects) plus any numeric limits
+      const body = { tenant_name: form.name.trim() };
+      const numFields = ["max_concurrent","requests_per_minute","tokens_per_minute","budget_limit","max_context_tokens","max_output_tokens"];
+      numFields.forEach(k => { if (form[k]) body[k] = Number(form[k]); });
+      if (form.budget_limit) body.budget_window = form.budget_window;
+      const res = await apiFetch(baseUrl, "/admin/tenants", { token, method: "POST", body });
+      const key = res.api_key || res.key || res.token;
+      setShowAdd(false);
+      if (key) setRevealKey(key); else toast("Tenant created");
       setForm({ name: "", tier: "standard", max_concurrent: "", requests_per_minute: "", tokens_per_minute: "", budget_limit: "", budget_window: "month", model_access: "all", region: "us-east-1", max_context_tokens: "", max_output_tokens: "" });
       load();
     } catch (e) { toast(e.message, "error"); } finally { setSaving(false); }
@@ -461,6 +515,7 @@ function TenantsTab({ baseUrl, token, toast }) {
 
   return (
     <Anim>
+      {revealKey && <ApiKeyCopyModal apiKey={revealKey} onClose={() => setRevealKey(null)} />}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text }}>Tenants <span style={{ fontSize: 13, fontWeight: 400, color: T.textTert }}>({tenants.length})</span></h2>
         <Btn onClick={() => setShowAdd(true)}><SVG d="M12 4v16m8-8H4" size={14} /> Add Tenant</Btn>
@@ -562,9 +617,9 @@ function TenantsTab({ baseUrl, token, toast }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead><tr>{["Name","ID","Tier","Region","Concurrency","RPM","Status",""].map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: `1px solid ${T.border}`, background: T.bg }}>{h}</th>)}</tr></thead>
             <tbody>{tenants.map(t => (
-              <tr key={t.id} style={{ borderBottom: `1px solid ${T.border}` }}>
-                <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{t.name}</td>
-                <td style={{ padding: "10px 14px", color: T.textTert, fontFamily: "monospace", fontSize: 11 }}>{t.id?.slice(0, 12)}…</td>
+              <tr key={t.id || t.tenant_id} style={{ borderBottom: `1px solid ${T.border}` }}>
+                <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{t.name || t.tenant_name || t.display_name || t.id || "—"}</td>
+                <td style={{ padding: "10px 14px", color: T.textTert, fontFamily: "monospace", fontSize: 11 }}>{(t.id || t.tenant_id || "")?.slice(0, 12)}…</td>
                 <td style={{ padding: "10px 14px" }}><Badge variant="accent">{t.tier || "standard"}</Badge></td>
                 <td style={{ padding: "10px 14px", color: T.textSec }}>{t.region || "—"}</td>
                 <td style={{ padding: "10px 14px", color: T.textSec }}>{t.max_concurrent ?? "—"}</td>
@@ -589,8 +644,8 @@ function KeysTab({ baseUrl, token, toast }) {
   const [creating, setCreating] = useState(false); const [keyName, setKeyName] = useState("");
   const [revealKey, setRevealKey] = useState(null); // Change 1: show modal instead of toast
 
-  const loadTenants = () => apiFetch(baseUrl, "/admin/tenants", { token }).then(t => { setTenants(t); if (t.length && !selTenant) setSelTenant(t[0].id); }).catch(() => {});
-  const loadKeys = (tid) => { if (!tid) return; apiFetch(baseUrl, `/admin/tenants/${tid}/keys`, { token }).then(setKeys).catch(() => setKeys([])).finally(() => setLoading(false)); };
+  const loadTenants = () => apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length && !selTenant) setSelTenant(t[0].id); }).catch(() => {});
+  const loadKeys = (tid) => { if (!tid) return; apiFetch(baseUrl, `/admin/tenants/${tid}/keys`, { token }).then(r => setKeys(normalizeKeys(r))).catch(() => setKeys([])).finally(() => setLoading(false)); };
   useEffect(() => { loadTenants(); }, []);
   useEffect(() => { if (selTenant) loadKeys(selTenant); }, [selTenant]);
 
@@ -598,8 +653,15 @@ function KeysTab({ baseUrl, token, toast }) {
     if (!selTenant) return;
     setCreating(true);
     try {
-      const res = await apiFetch(baseUrl, `/admin/tenants/${selTenant}/keys`, { token, method: "POST", body: { name: keyName || `key-${Date.now()}` } });
-      setRevealKey(res.key || res.api_key || res.token || JSON.stringify(res)); // Change 1: open modal
+      const kn = keyName || `key-${Date.now()}`;
+      const res = await apiFetch(baseUrl, `/admin/tenants/${selTenant}/keys`, { token, method: "POST", body: { name: kn, key_name: kn } });
+      // Extract the key from wherever the backend puts it
+      const key = res.key || res.api_key || res.raw_key || res.token || res.data?.key || res.data?.api_key;
+      if (key && typeof key === "string") {
+        setRevealKey(key);
+      } else {
+        toast("Key created (check keys list)", "info");
+      }
       setKeyName(""); loadKeys(selTenant);
     } catch (e) { toast(e.message, "error"); } finally { setCreating(false); }
   };
@@ -618,7 +680,7 @@ function KeysTab({ baseUrl, token, toast }) {
           <SectionLabel>Tenant</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {tenants.map(t => (
-              <button key={t.id} onClick={() => setSelTenant(t.id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === t.id ? T.accentLight : "none", border: `1px solid ${selTenant === t.id ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === t.id ? T.accent : T.text, fontFamily: "inherit" }}>{t.name}</button>
+              <button key={t.id || t.tenant_id} onClick={() => setSelTenant(t.id || t.tenant_id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === (t.id || t.tenant_id) ? T.accentLight : "none", border: `1px solid ${selTenant === (t.id || t.tenant_id) ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === (t.id || t.tenant_id) ? T.accent : T.text, fontFamily: "inherit" }}>{t.name || t.tenant_name || t.display_name || t.id}</button>
             ))}
           </div>
         </Card>
@@ -661,25 +723,37 @@ function KeysTab({ baseUrl, token, toast }) {
 function PolicyTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [selTenant, setSelTenant] = useState("");
   const [policy, setPolicy] = useState(null); const [saving, setSaving] = useState(false); const [loading, setLoading] = useState(false);
-  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(t => { setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
+  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
   useEffect(() => {
     if (!selTenant) return; setLoading(true);
-    apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token }).then(t => {
-      setPolicy({
-        max_concurrent: t.max_concurrent ?? "", requests_per_minute: t.requests_per_minute ?? "",
-        tokens_per_minute: t.tokens_per_minute ?? "", max_context_tokens: t.max_context_tokens ?? "",
-        max_output_tokens: t.max_output_tokens ?? "",
-        budget_limit: t.budget_limit ?? "", budget_window: t.budget_window ?? "month",
-        budget_alert_threshold: t.budget_alert_threshold ?? "80",
-      });
-    }).catch(() => {}).finally(() => setLoading(false));
-  }, [selTenant]);
+    const extractPolicy = (t) => ({
+      max_concurrent: t.max_concurrent ?? "",
+      requests_per_minute: t.requests_per_minute ?? t.rpm_limit ?? "",
+      tokens_per_minute: t.tokens_per_minute ?? t.tpm_limit ?? "",
+      max_context_tokens: t.max_context_tokens ?? "",
+      max_output_tokens: t.max_output_tokens ?? "",
+      budget_limit: t.budget_limit ?? "", budget_window: t.budget_window ?? "month",
+      budget_alert_threshold: t.budget_alert_threshold ?? "80",
+    });
+    // Try single-tenant endpoint, fall back to finding tenant from list
+    apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token })
+      .then(t => setPolicy(extractPolicy(t)))
+      .catch(() => {
+        const found = tenants.find(t => t.id === selTenant);
+        if (found) setPolicy(extractPolicy(found));
+        else setPolicy({ max_concurrent: "", requests_per_minute: "", tokens_per_minute: "", max_context_tokens: "", max_output_tokens: "", budget_limit: "", budget_window: "month", budget_alert_threshold: "80" });
+      })
+      .finally(() => setLoading(false));
+  }, [selTenant, tenants]);
 
   const save = async () => {
     setSaving(true);
     try {
       const body = {};
       Object.entries(policy).forEach(([k, v]) => { if (v !== "") body[k] = isNaN(v) ? v : Number(v); });
+      // Also send backend-native field names if they differ
+      if (body.requests_per_minute != null) body.rpm_limit = body.requests_per_minute;
+      if (body.tokens_per_minute != null) body.tpm_limit = body.tokens_per_minute;
       await apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token, method: "PATCH", body });
       toast("Policy saved");
     } catch (e) { toast(e.message, "error"); } finally { setSaving(false); }
@@ -705,7 +779,7 @@ function PolicyTab({ baseUrl, token, toast }) {
           <SectionLabel>Tenant</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {tenants.map(t => (
-              <button key={t.id} onClick={() => setSelTenant(t.id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === t.id ? T.accentLight : "none", border: `1px solid ${selTenant === t.id ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === t.id ? T.accent : T.text, fontFamily: "inherit" }}>{t.name}</button>
+              <button key={t.id || t.tenant_id} onClick={() => setSelTenant(t.id || t.tenant_id)} style={{ textAlign: "left", padding: "8px 10px", borderRadius: 8, background: selTenant === (t.id || t.tenant_id) ? T.accentLight : "none", border: `1px solid ${selTenant === (t.id || t.tenant_id) ? T.accent + "40" : "transparent"}`, cursor: "pointer", fontSize: 13, fontWeight: 600, color: selTenant === (t.id || t.tenant_id) ? T.accent : T.text, fontFamily: "inherit" }}>{t.name || t.tenant_name || t.display_name || t.id}</button>
             ))}
           </div>
         </Card>
@@ -796,13 +870,16 @@ function AuditTab({ baseUrl, token }) {
   const [tenants, setTenants] = useState([]); const [filterTenant, setFilterTenant] = useState("");
   const [filterWindow, setFilterWindow] = useState("24h");
 
-  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(setTenants).catch(() => {}); }, []);
+  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => setTenants(normalizeTenants(r))).catch(() => {}); }, []);
   useEffect(() => {
     setLoading(true);
     const path = subTab === "runs"
       ? `/admin/audit/runs?window=${filterWindow}${filterTenant ? `&tenant_id=${filterTenant}` : ""}`
       : `/admin/audit/admin?window=${filterWindow}${filterTenant ? `&tenant_id=${filterTenant}` : ""}`;
-    apiFetch(baseUrl, path, { token }).then(setLogs).catch(() => setLogs([])).finally(() => setLoading(false));
+    apiFetch(baseUrl, path, { token }).then(r => {
+      const arr = Array.isArray(r) ? r : (r.data || r.runs || r.logs || r.events || r.items || []);
+      setLogs(arr);
+    }).catch(() => setLogs([])).finally(() => setLoading(false));
   }, [subTab, filterTenant, filterWindow]);
 
   const actionColors = {
@@ -896,7 +973,8 @@ function AuditTab({ baseUrl, token }) {
 function UsageTab({ baseUrl, token }) {
   const [tenants, setTenants] = useState([]); const [usage, setUsage] = useState({}); const [loading, setLoading] = useState(true);
   useEffect(() => {
-    apiFetch(baseUrl, "/admin/tenants", { token }).then(async ts => {
+    apiFetch(baseUrl, "/admin/tenants", { token }).then(async r => {
+      const ts = normalizeTenants(r);
       setTenants(ts);
       const entries = await Promise.all(ts.map(t => apiFetch(baseUrl, `/admin/tenants/${t.id}/usage`, { token }).then(u => [t.id, u]).catch(() => [t.id, {}])));
       setUsage(Object.fromEntries(entries)); setLoading(false);
@@ -931,8 +1009,8 @@ function TestTab({ baseUrl, toast }) {
   const [tenants, setTenants] = useState([]); const [selTenant, setSelTenant] = useState("");
   const [keys, setKeys] = useState([]); const [selKey, setSelKey] = useState("");
   const [prompt, setPrompt] = useState("Explain enterprise AI governance in 3 sentences."); const [result, setResult] = useState(null); const [loading, setLoading] = useState(false);
-  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", {}).then(t => { setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
-  useEffect(() => { if (selTenant) apiFetch(baseUrl, `/admin/tenants/${selTenant}/keys`, {}).then(k => { setKeys(k); if (k.length) setSelKey(k[0].id); }).catch(() => setKeys([])); }, [selTenant]);
+  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", {}).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
+  useEffect(() => { if (selTenant) apiFetch(baseUrl, `/admin/tenants/${selTenant}/keys`, {}).then(r => { const k = normalizeKeys(r); setKeys(k); if (k.length) setSelKey(k[0].id); }).catch(() => setKeys([])); }, [selTenant]);
   const run = async () => {
     setLoading(true); setResult(null);
     try {
