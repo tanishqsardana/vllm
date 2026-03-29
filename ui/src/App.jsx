@@ -206,33 +206,44 @@ function ConnectScreen({ onConnect }) {
   );
 }
 
-/* ═══════════════════ OVERVIEW TAB [FIX 8: version fields] ═══════════════════ */
+/* ═══════════════════ OVERVIEW TAB ═══════════════════ */
 function OverviewTab({ baseUrl, token }) {
   const [data, setData] = useState(null); const [loading, setLoading] = useState(true);
-  useEffect(() => {
+
+  const load = () => {
+    setLoading(true);
     Promise.all([
       apiFetch(baseUrl, "/admin/tenants", { token }).catch(() => []),
       apiFetch(baseUrl, "/version").catch(() => ({})),
-    ]).then(([tenantsRaw, version]) => {
+      apiFetch(baseUrl, "/admin/usage/tenants?window=24h", { token }).catch(() => ({ data: [] })),
+    ]).then(([tenantsRaw, version, usageRaw]) => {
       const tenants = normalizeTenants(tenantsRaw);
+      const usageRows = usageRaw.data || [];
       const usage = {
-        total_requests: tenants.reduce((s, t) => s + (t.total_requests || 0), 0),
-        total_tokens: tenants.reduce((s, t) => s + (t.total_tokens || 0), 0),
+        total_requests: usageRows.reduce((s, u) => s + (u.requests || 0), 0),
+        total_tokens: usageRows.reduce((s, u) => s + (u.total_tokens || 0), 0),
       };
       setData({ tenants, usage, version });
       setLoading(false);
     });
-  }, []);
+  };
+
+  useEffect(() => { load(); }, []);
+
   if (loading) return <div style={{ padding: 40, textAlign: "center", color: T.textTert }}><Spinner size={20} /></div>;
   const tenants = data?.tenants || []; const usage = data?.usage || {}; const version = data?.version || {};
+  const activeTenants = tenants.filter(t => t.is_active !== false);
   const kpis = [
-    { label: "Active Tenants", value: tenants.length, icon: "M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-2 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4", accent: T.accent },
+    { label: "Active Tenants", value: activeTenants.length, icon: "M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-2 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4", accent: T.accent },
     { label: "Total API Keys", value: tenants.reduce((s, t) => s + (t.api_key_count || 0), 0), icon: "M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z", accent: T.accent2 },
-    { label: "Total Requests", value: (usage.total_requests || 0).toLocaleString(), icon: "M13 10V3L4 14h7v7l9-11h-7z", accent: T.info },
-    { label: "Total Tokens", value: (usage.total_tokens || 0).toLocaleString(), icon: "M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z", accent: T.success },
+    { label: "Requests (24h)", value: (usage.total_requests || 0).toLocaleString(), icon: "M13 10V3L4 14h7v7l9-11h-7z", accent: T.info },
+    { label: "Tokens (24h)", value: (usage.total_tokens || 0) >= 1e6 ? `${((usage.total_tokens || 0) / 1e6).toFixed(2)}M` : (usage.total_tokens || 0).toLocaleString(), icon: "M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z", accent: T.success },
   ];
   return (
     <Anim>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <Btn variant="secondary" small onClick={load}><SVG d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" size={13} /> Refresh</Btn>
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 20 }}>
         {kpis.map(k => (
           <Card key={k.label}>
@@ -250,8 +261,8 @@ function OverviewTab({ baseUrl, token }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {tenants.slice(0, 6).map(t => (
                 <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.border}` }}>
-                  <div><div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{t.name}</div><div style={{ fontSize: 11, color: T.textTert }}>{t.id}</div></div>
-                  <Badge variant="success">Active</Badge>
+                  <div><div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{t.name}</div><div style={{ fontSize: 11, color: T.textTert }}>{(t.id || "").slice(0, 14)}…</div></div>
+                  <Badge variant={t.is_active !== false ? "success" : "danger"}>{t.is_active !== false ? "Active" : "Inactive"}</Badge>
                 </div>
               ))}
             </div>
@@ -259,7 +270,6 @@ function OverviewTab({ baseUrl, token }) {
         </Card>
         <Card>
           <SectionLabel>System Info</SectionLabel>
-          {/* FIX 8: Use correct field names from backend GatewayVersion */}
           {[
             ["Build SHA", version.build_sha || "—"],
             ["Model", version.model_id || "—"],
@@ -490,11 +500,20 @@ function TenantsTab({ baseUrl, token, toast }) {
     setForm(f => ({ ...f, tier, ...Object.fromEntries(Object.entries(p).map(([k, v]) => [k, String(v)])) }));
   };
 
+  const toggleActive = async (t) => {
+    const next = t.is_active === false;
+    if (!next && !confirm(`Deactivate "${t.name}"? All API keys for this tenant will stop working immediately.`)) return;
+    try {
+      await apiFetch(baseUrl, `/admin/tenants/${t.id}`, { token, method: "PATCH", body: { is_active: next } });
+      toast(next ? `${t.name} activated` : `${t.name} deactivated`);
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  };
+
   const add = async () => {
     if (!form.name.trim()) { toast("Name is required", "error"); return; }
     setSaving(true);
     try {
-      /* FIX 5: Use backend field names (rpm_limit, tpm_limit) not requests_per_minute/tokens_per_minute */
       const body = { tenant_name: form.name.trim() };
       const numFields = ["max_concurrent", "rpm_limit", "tpm_limit", "max_context_tokens", "max_output_tokens"];
       numFields.forEach(k => { if (form[k]) body[k] = Number(form[k]); });
@@ -523,7 +542,10 @@ function TenantsTab({ baseUrl, token, toast }) {
       {revealKey && <ApiKeyCopyModal apiKey={revealKey} onClose={() => setRevealKey(null)} />}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text }}>Tenants <span style={{ fontSize: 13, fontWeight: 400, color: T.textTert }}>({tenants.length})</span></h2>
-        <Btn onClick={() => setShowAdd(true)}><SVG d="M12 4v16m8-8H4" size={14} /> Add Tenant</Btn>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="secondary" small onClick={load}><SVG d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" size={13} /> Refresh</Btn>
+          <Btn onClick={() => setShowAdd(true)}><SVG d="M12 4v16m8-8H4" size={14} /> Add Tenant</Btn>
+        </div>
       </div>
 
       {showAdd && (
@@ -598,7 +620,7 @@ function TenantsTab({ baseUrl, token, toast }) {
       {loading ? <div style={{ textAlign: "center", padding: 40 }}><Spinner size={20} /></div> : (
         <Card style={{ padding: 0 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Name", "ID", "Concurrency", "RPM", "TPM", "Status"].map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: `1px solid ${T.border}`, background: T.bg }}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Name", "ID", "Concurrency", "RPM", "TPM", "Status", ""].map(h => <th key={h} style={{ textAlign: "left", padding: "10px 14px", fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: `1px solid ${T.border}`, background: T.bg }}>{h}</th>)}</tr></thead>
             <tbody>{tenants.map(t => (
               <tr key={t.id || t.tenant_id} style={{ borderBottom: `1px solid ${T.border}` }}>
                 <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text }}>{t.name}</td>
@@ -607,6 +629,11 @@ function TenantsTab({ baseUrl, token, toast }) {
                 <td style={{ padding: "10px 14px", color: T.textSec }}>{t.rpm_limit ?? "—"}</td>
                 <td style={{ padding: "10px 14px", color: T.textSec }}>{t.tpm_limit ?? "—"}</td>
                 <td style={{ padding: "10px 14px" }}><Badge variant={t.is_active !== false ? "success" : "danger"}>{t.is_active !== false ? "Active" : "Inactive"}</Badge></td>
+                <td style={{ padding: "10px 14px" }}>
+                  <Btn variant={t.is_active !== false ? "danger" : "primary"} small onClick={() => toggleActive(t)}>
+                    {t.is_active !== false ? "Deactivate" : "Activate"}
+                  </Btn>
+                </td>
               </tr>
             ))}</tbody>
           </table>
@@ -798,15 +825,18 @@ function KeysTab({ baseUrl, token, toast }) {
   );
 }
 
-/* ═══════════════════ POLICY TAB [FIX 6: split tenant PATCH + budget PUT] ═══════════════════ */
+/* ═══════════════════ POLICY TAB ═══════════════════ */
 function PolicyTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [selTenant, setSelTenant] = useState("");
   const [policy, setPolicy] = useState(null); const [saving, setSaving] = useState(false); const [loading, setLoading] = useState(false);
-  useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
+  const [budgetStatus, setBudgetStatus] = useState(null);
 
-  useEffect(() => {
-    if (!selTenant) return; setLoading(true);
-    /* FIX 6: Use correct backend field names (rpm_limit, tpm_limit) */
+  const loadTenants = () => apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length && !selTenant) setSelTenant(t[0].id); }).catch(() => {});
+  useEffect(() => { loadTenants(); }, []);
+
+  const loadPolicy = (tid) => {
+    if (!tid) return;
+    setLoading(true); setBudgetStatus(null);
     const extractPolicy = (t) => ({
       max_concurrent: t.max_concurrent ?? "",
       rpm_limit: t.rpm_limit ?? "",
@@ -814,27 +844,26 @@ function PolicyTab({ baseUrl, token, toast }) {
       max_context_tokens: t.max_context_tokens ?? "",
       max_output_tokens: t.max_output_tokens ?? "",
       budget_limit: "", budget_window: "month",
-      budget_alert_threshold: "80",
     });
-    /* FIX 6: Use the new GET /admin/tenants/{id} endpoint (added to backend) */
-    apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token })
+    apiFetch(baseUrl, `/admin/tenants/${tid}`, { token })
       .then(t => setPolicy(extractPolicy(t)))
       .catch(() => {
-        const found = tenants.find(t => t.id === selTenant);
-        setPolicy(found ? extractPolicy(found) : { max_concurrent: "", rpm_limit: "", tpm_limit: "", max_context_tokens: "", max_output_tokens: "", budget_limit: "", budget_window: "month", budget_alert_threshold: "80" });
+        const found = tenants.find(t => t.id === tid);
+        setPolicy(found ? extractPolicy(found) : { max_concurrent: "", rpm_limit: "", tpm_limit: "", max_context_tokens: "", max_output_tokens: "", budget_limit: "", budget_window: "month" });
       })
       .finally(() => setLoading(false));
-    /* FIX 6: Fetch budget separately from /admin/budgets?tenant_id= */
-    apiFetch(baseUrl, `/admin/budgets?tenant_id=${selTenant}`, { token })
+    apiFetch(baseUrl, `/admin/budgets?tenant_id=${tid}`, { token })
       .then(r => {
         const budgets = r.data || [];
-        if (budgets.length > 0) {
-          setPolicy(p => p ? { ...p, budget_limit: budgets[0].budget_usd || "", budget_window: budgets[0].window || "month" } : p);
-        }
+        if (budgets.length > 0) setPolicy(p => p ? { ...p, budget_limit: budgets[0].budget_usd || "", budget_window: budgets[0].window || "month" } : p);
       }).catch(() => {});
-  }, [selTenant, tenants]);
+    apiFetch(baseUrl, `/admin/budget_status?tenant_id=${tid}`, { token })
+      .then(r => setBudgetStatus(r))
+      .catch(() => setBudgetStatus(null));
+  };
 
-  /* FIX 6: Split save into tenant PATCH + budget PUT */
+  useEffect(() => { loadPolicy(selTenant); }, [selTenant, tenants.length]);
+
   const save = async () => {
     setSaving(true);
     try {
@@ -844,7 +873,6 @@ function PolicyTab({ baseUrl, token, toast }) {
       if (policy.tpm_limit !== "") tenantBody.tpm_limit = Number(policy.tpm_limit);
       if (policy.max_context_tokens !== "") tenantBody.max_context_tokens = Number(policy.max_context_tokens);
       if (policy.max_output_tokens !== "") tenantBody.max_output_tokens = Number(policy.max_output_tokens);
-
       if (Object.keys(tenantBody).length > 0) {
         await apiFetch(baseUrl, `/admin/tenants/${selTenant}`, { token, method: "PATCH", body: tenantBody });
       }
@@ -855,13 +883,16 @@ function PolicyTab({ baseUrl, token, toast }) {
         });
       }
       toast("Policy saved");
+      loadPolicy(selTenant);
     } catch (e) { toast(e.message, "error"); } finally { setSaving(false); }
   };
 
+  // Preset names match TenantsTab tier names exactly
   const PRESETS = [
-    { label: "Conservative", max_concurrent: 5, rpm_limit: 60, tpm_limit: 50000, max_context_tokens: 8192, max_output_tokens: 1024 },
-    { label: "Standard", max_concurrent: 20, rpm_limit: 300, tpm_limit: 200000, max_context_tokens: 32768, max_output_tokens: 4096 },
-    { label: "Pro", max_concurrent: 50, rpm_limit: 1000, tpm_limit: 1000000, max_context_tokens: 131072, max_output_tokens: 8192 },
+    { label: "Starter",     max_concurrent: 5,   rpm_limit: 60,   tpm_limit: 50000,    max_context_tokens: 8192,   max_output_tokens: 1024 },
+    { label: "Standard",    max_concurrent: 20,  rpm_limit: 300,  tpm_limit: 200000,   max_context_tokens: 32768,  max_output_tokens: 4096 },
+    { label: "Pro",         max_concurrent: 50,  rpm_limit: 1000, tpm_limit: 1000000,  max_context_tokens: 131072, max_output_tokens: 8192 },
+    { label: "Enterprise",  max_concurrent: 200, rpm_limit: 5000, tpm_limit: 10000000, max_context_tokens: 131072, max_output_tokens: 8192 },
   ];
 
   const Field = ({ label, key_, unit }) => (
@@ -870,6 +901,10 @@ function PolicyTab({ baseUrl, token, toast }) {
       <Input value={policy?.[key_] ?? ""} onChange={v => setPolicy(p => ({ ...p, [key_]: v }))} type="number" placeholder="—" />
     </div>
   );
+
+  const budgetRatio = budgetStatus?.budget_ratio ?? 0;
+  const spentUsd = budgetStatus?.cost_usd ?? 0;
+  const barColor = budgetRatio >= 1 ? T.danger : budgetRatio >= 0.8 ? T.warning : T.success;
 
   return (
     <Anim>
@@ -883,13 +918,16 @@ function PolicyTab({ baseUrl, token, toast }) {
           </div>
         </Card>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <Btn variant="secondary" small onClick={() => loadPolicy(selTenant)} disabled={!selTenant}><SVG d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" size={13} /> Refresh</Btn>
+          </div>
           {loading ? <div style={{ textAlign: "center", padding: 40 }}><Spinner size={18} /></div> : policy && (
             <>
               <Card>
-                <SectionLabel>Presets</SectionLabel>
+                <SectionLabel>Tier Presets</SectionLabel>
                 <div style={{ display: "flex", gap: 8 }}>
                   {PRESETS.map(p => (
-                    <Btn key={p.label} variant="secondary" small onClick={() => setPolicy(prev => ({ ...prev, max_concurrent: p.max_concurrent, rpm_limit: p.rpm_limit, tpm_limit: p.tpm_limit, max_context_tokens: p.max_context_tokens, max_output_tokens: p.max_output_tokens }))}>{p.label}</Btn>
+                    <Btn key={p.label} variant="secondary" small onClick={() => setPolicy(prev => ({ ...prev, max_concurrent: p.max_concurrent, rpm_limit: p.rpm_limit, tpm_limit: p.tpm_limit, max_context_tokens: p.max_context_tokens, max_output_tokens: p.max_output_tokens }))} style={{ textTransform: "capitalize" }}>{p.label}</Btn>
                   ))}
                 </div>
               </Card>
@@ -910,7 +948,7 @@ function PolicyTab({ baseUrl, token, toast }) {
               </Card>
               <Card>
                 <SectionLabel>Spend Policy</SectionLabel>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <div>
                     <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Budget Cap ($)</div>
                     <Input value={policy.budget_limit} onChange={v => setPolicy(p => ({ ...p, budget_limit: v }))} type="number" placeholder="No limit" />
@@ -923,21 +961,21 @@ function PolicyTab({ baseUrl, token, toast }) {
                       <option value="month">Monthly</option>
                     </Select>
                   </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: T.textTert, marginBottom: 4 }}>Alert Threshold (%)</div>
-                    <Input value={policy.budget_alert_threshold} onChange={v => setPolicy(p => ({ ...p, budget_alert_threshold: v }))} type="number" placeholder="80" />
-                  </div>
                 </div>
-                {policy.budget_limit && (
-                  <div style={{ marginTop: 12 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: T.textTert, marginBottom: 4 }}>
-                      <span>Budget limit set</span><span>${policy.budget_limit} / {policy.budget_window}</span>
+                {budgetStatus && (
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+                      <span style={{ color: T.textSec, fontWeight: 600 }}>Current spend this {budgetStatus.window}</span>
+                      <span style={{ color: barColor, fontWeight: 700 }}>${spentUsd.toFixed(4)} / ${budgetStatus.budget_usd.toFixed(2)}</span>
                     </div>
-                    <div style={{ background: T.bg, borderRadius: 6, height: 6, overflow: "hidden", border: `1px solid ${T.border}` }}>
-                      <div style={{ height: "100%", width: "0%", background: T.success, borderRadius: 6 }} />
+                    <div style={{ background: T.bg, borderRadius: 6, height: 8, overflow: "hidden", border: `1px solid ${T.border}` }}>
+                      <div style={{ height: "100%", width: `${Math.min(budgetRatio * 100, 100).toFixed(1)}%`, background: barColor, borderRadius: 6, transition: "width 0.4s ease" }} />
                     </div>
-                    <div style={{ fontSize: 11, color: T.textTert, marginTop: 4 }}>$0 spent this {policy.budget_window}</div>
+                    <div style={{ fontSize: 11, color: T.textTert, marginTop: 4 }}>{(budgetRatio * 100).toFixed(1)}% of budget used</div>
                   </div>
+                )}
+                {!budgetStatus && policy.budget_limit && (
+                  <div style={{ marginTop: 10, fontSize: 11, color: T.textTert }}>Budget set — spend data loads once requests are recorded.</div>
                 )}
               </Card>
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -951,27 +989,28 @@ function PolicyTab({ baseUrl, token, toast }) {
   );
 }
 
-/* ═══════════════════ AUDIT TAB [FIX 3: single /admin/audit endpoint] ═══════════════════ */
+/* ═══════════════════ AUDIT TAB ═══════════════════ */
 function AuditTab({ baseUrl, token }) {
-  const [subTab, setSubTab] = useState("runs");
   const [logs, setLogs] = useState([]); const [loading, setLoading] = useState(true);
   const [tenants, setTenants] = useState([]); const [filterTenant, setFilterTenant] = useState("");
   const [filterWindow, setFilterWindow] = useState("24h");
 
   useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => setTenants(normalizeTenants(r))).catch(() => {}); }, []);
-  useEffect(() => {
+
+  const load = () => {
     setLoading(true);
-    /* FIX 3: Use single /admin/audit endpoint — no /runs or /admin sub-paths */
     const path = `/admin/audit?window=${filterWindow}${filterTenant ? `&tenant_id=${filterTenant}` : ""}`;
     apiFetch(baseUrl, path, { token }).then(r => {
       const arr = Array.isArray(r) ? r : (r.data || r.runs || r.logs || r.events || r.items || []);
       setLogs(arr);
     }).catch(() => setLogs([])).finally(() => setLoading(false));
-  }, [subTab, filterTenant, filterWindow]);
+  };
+  useEffect(() => { load(); }, [filterTenant, filterWindow]);
 
   const actionColors = {
     tenant_create: "success", seat_create: "success", key_create: "success", budget_set: "success",
     tenant_update_limits: "info", seat_update: "info", budget_update: "info",
+    tenant_activated: "success", tenant_deactivated: "warning",
     seat_activated: "success", seat_deactivated: "warning",
     key_revoke: "danger",
     profile_viewed: "accent", profile_generated: "accent",
@@ -981,23 +1020,16 @@ function AuditTab({ baseUrl, token }) {
   return (
     <Anim>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <div style={{ display: "flex", gap: 0, border: `1px solid ${T.border}`, borderRadius: 9, overflow: "hidden" }}>
-          {[
-            { id: "runs", label: "All Events", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" },
-          ].map(s => (
-            <button key={s.id} onClick={() => setSubTab(s.id)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 14px", fontSize: 13, fontWeight: 600, border: "none", background: subTab === s.id ? T.accent : T.card, color: subTab === s.id ? "#fff" : T.textSec, cursor: "pointer", fontFamily: "inherit" }}>
-              <SVG d={s.icon} size={13} color={subTab === s.id ? "#fff" : T.textSec} /> {s.label}
-            </button>
-          ))}
-        </div>
+        <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text }}>Audit Log</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <Select value={filterTenant} onChange={setFilterTenant}>
             <option value="">All tenants</option>
             {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </Select>
           <Select value={filterWindow} onChange={setFilterWindow}>
-            {["1h", "24h", "7d"].map(w => <option key={w} value={w}>{w}</option>)}
+            {["1h", "24h", "7d", "30d"].map(w => <option key={w} value={w}>{w}</option>)}
           </Select>
+          <Btn variant="secondary" small onClick={load}><SVG d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" size={13} /> Refresh</Btn>
         </div>
       </div>
 
@@ -1042,13 +1074,14 @@ function UsageTab({ baseUrl, token }) {
   const [window_, setWindow_] = useState("24h");
   const [costEnabled, setCostEnabled] = useState(false);
 
-  useEffect(() => {
+  const load = () => {
     setLoading(true);
     apiFetch(baseUrl, `/admin/usage/tenants?window=${window_}`, { token })
       .then(r => { setRows(r.data || []); setCostEnabled(r.cost_estimation_enabled || false); })
       .catch(() => setRows([]))
       .finally(() => setLoading(false));
-  }, [window_]);
+  };
+  useEffect(() => { load(); }, [window_]);
 
   const totals = rows.reduce((acc, u) => ({
     requests: acc.requests + (u.requests || 0),
@@ -1070,9 +1103,12 @@ function UsageTab({ baseUrl, token }) {
     <Anim>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text }}>Tenant Usage</h2>
-        <Select value={window_} onChange={setWindow_}>
-          {["1h", "24h", "7d", "30d"].map(w => <option key={w} value={w}>{w}</option>)}
-        </Select>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Select value={window_} onChange={setWindow_}>
+            {["1h", "24h", "7d", "30d"].map(w => <option key={w} value={w}>{w}</option>)}
+          </Select>
+          <Btn variant="secondary" small onClick={load}><SVG d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" size={13} /> Refresh</Btn>
+        </div>
       </div>
 
       {/* KPI summary cards */}
@@ -1125,27 +1161,18 @@ function UsageTab({ baseUrl, token }) {
 /* ═══════════════════ TEST TAB ═══════════════════ */
 function TestTab({ baseUrl, token, toast }) {
   const [tenants, setTenants] = useState([]); const [selTenant, setSelTenant] = useState("");
-  const [tenantKeyIds, setTenantKeyIds] = useState(new Set());
   const [apiKey, setApiKey] = useState("");
   const [keyError, setKeyError] = useState("");
   const [prompt, setPrompt] = useState("Explain enterprise AI governance in 3 sentences."); const [result, setResult] = useState(null); const [loading, setLoading] = useState(false);
 
   useEffect(() => { apiFetch(baseUrl, "/admin/tenants", { token }).then(r => { const t = normalizeTenants(r); setTenants(t); if (t.length) setSelTenant(t[0].id); }).catch(() => {}); }, []);
 
-  // When tenant changes, clear the API key field and load that tenant's key IDs for validation
-  useEffect(() => {
-    setApiKey("");
-    setKeyError("");
-    setResult(null);
-    if (selTenant) {
-      apiFetch(baseUrl, `/admin/keys?tenant_id=${selTenant}`, { token })
-        .then(r => { const k = normalizeKeys(r); setTenantKeyIds(new Set(k.map(ki => ki.id))); })
-        .catch(() => setTenantKeyIds(new Set()));
-    }
-  }, [selTenant]);
+  // When tenant changes, clear API key, key error, and previous result
+  useEffect(() => { setApiKey(""); setKeyError(""); setResult(null); }, [selTenant]);
 
   const validateKey = (key) => {
-    if (!key || !key.startsWith("cp_")) {
+    // Only show error if the user has typed something that doesn't look right
+    if (key.length > 0 && !key.startsWith("cp_")) {
       setKeyError("API keys start with cp_ — paste the full key shown at creation time.");
     } else {
       setKeyError("");
@@ -1238,15 +1265,17 @@ export default function App() {
         </div>
       </nav>
       <main style={{ maxWidth: 1280, margin: "0 auto", padding: "22px 20px" }}>
+        {/* Data tabs: mount/unmount on switch (fetches fresh data each visit) */}
         {tab === "overview"   && <OverviewTab baseUrl={baseUrl} token={token} />}
-        {tab === "live"       && <LiveTab baseUrl={baseUrl} token={token} />}
-        {tab === "dynamo"     && <DynamoTab baseUrl={baseUrl} token={token} />}
         {tab === "tenants"    && <TenantsTab baseUrl={baseUrl} token={token} toast={toast} />}
         {tab === "keys"       && <KeysTab baseUrl={baseUrl} token={token} toast={toast} />}
         {tab === "policy"     && <PolicyTab baseUrl={baseUrl} token={token} toast={toast} />}
         {tab === "audit"      && <AuditTab baseUrl={baseUrl} token={token} />}
         {tab === "usage"      && <UsageTab baseUrl={baseUrl} token={token} />}
         {tab === "test"       && <TestTab baseUrl={baseUrl} token={token} toast={toast} />}
+        {/* Live polling tabs: kept mounted always so sparkline history and poll intervals survive tab switches */}
+        <div style={{ display: tab === "live" ? "block" : "none" }}><LiveTab baseUrl={baseUrl} token={token} /></div>
+        <div style={{ display: tab === "dynamo" ? "block" : "none" }}><DynamoTab baseUrl={baseUrl} token={token} /></div>
       </main>
       {toastMsg && <Toast message={toastMsg.msg} type={toastMsg.type} onDone={() => setToastMsg(null)} />}
       <style>{`
