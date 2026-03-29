@@ -216,14 +216,17 @@ function OverviewTab({ baseUrl, token }) {
       apiFetch(baseUrl, "/admin/tenants", { token }).catch(() => []),
       apiFetch(baseUrl, "/version").catch(() => ({})),
       apiFetch(baseUrl, "/admin/usage/tenants?window=24h", { token }).catch(() => ({ data: [] })),
-    ]).then(([tenantsRaw, version, usageRaw]) => {
+      apiFetch(baseUrl, "/admin/keys", { token }).catch(() => ({ data: [] })),
+    ]).then(([tenantsRaw, version, usageRaw, keysRaw]) => {
       const tenants = normalizeTenants(tenantsRaw);
       const usageRows = usageRaw.data || [];
       const usage = {
         total_requests: usageRows.reduce((s, u) => s + (u.requests || 0), 0),
         total_tokens: usageRows.reduce((s, u) => s + (u.total_tokens || 0), 0),
       };
-      setData({ tenants, usage, version });
+      const allKeys = normalizeKeys(keysRaw);
+      const activeKeyCount = allKeys.filter(k => !k.revoked_at).length;
+      setData({ tenants, usage, version, activeKeyCount });
       setLoading(false);
     });
   };
@@ -235,7 +238,7 @@ function OverviewTab({ baseUrl, token }) {
   const activeTenants = tenants.filter(t => t.is_active !== false);
   const kpis = [
     { label: "Active Tenants", value: activeTenants.length, icon: "M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-2 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4", accent: T.accent },
-    { label: "Total API Keys", value: tenants.reduce((s, t) => s + (t.api_key_count || 0), 0), icon: "M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z", accent: T.accent2 },
+    { label: "Active API Keys", value: data?.activeKeyCount ?? 0, icon: "M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z", accent: T.accent2 },
     { label: "Requests (24h)", value: (usage.total_requests || 0).toLocaleString(), icon: "M13 10V3L4 14h7v7l9-11h-7z", accent: T.info },
     { label: "Tokens (24h)", value: (usage.total_tokens || 0) >= 1e6 ? `${((usage.total_tokens || 0) / 1e6).toFixed(2)}M` : (usage.total_tokens || 0).toLocaleString(), icon: "M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z", accent: T.success },
   ];
@@ -287,10 +290,11 @@ function OverviewTab({ baseUrl, token }) {
   );
 }
 
-/* ═══════════════════ LIVE TAB [FIX 4: nested response parsing] ═══════════════════ */
+/* ═══════════════════ LIVE TAB ═══════════════════ */
 function LiveTab({ baseUrl, token }) {
   const [metrics, setMetrics] = useState(null); const [history, setHistory] = useState([]); const histRef = useRef([]);
   const [error, setError] = useState(null);
+
   useEffect(() => {
     let active = true;
     const poll = async () => {
@@ -298,7 +302,6 @@ function LiveTab({ baseUrl, token }) {
         const m = await apiFetch(baseUrl, "/admin/dynamo/metrics", { token });
         if (!active) return;
         setMetrics(m); setError(null);
-        /* FIX 4: Backend returns { frontend: { inflight_requests, queued_requests, ... }, worker: { requests_running, requests_waiting, ... } } */
         const fe = m.frontend || {};
         const wk = m.worker || {};
         const point = {
@@ -306,6 +309,9 @@ function LiveTab({ baseUrl, token }) {
           inflight: (fe.inflight_requests ?? 0) + (wk.requests_running ?? 0),
           queued: (fe.queued_requests ?? 0) + (wk.requests_waiting ?? 0),
           tps: fe.total_requests ?? 0,
+          ttft_p95: fe.ttft_seconds?.p95 != null ? Math.round(fe.ttft_seconds.p95 * 1000) : null,
+          itl_p95: fe.itl_seconds?.p95 != null ? Math.round(fe.itl_seconds.p95 * 1000) : null,
+          gpu_cache: wk.gpu_cache_usage_percent ?? null,
         };
         histRef.current = [...histRef.current.slice(-59), point];
         setHistory([...histRef.current]);
@@ -315,44 +321,146 @@ function LiveTab({ baseUrl, token }) {
     return () => { active = false; clearInterval(id); };
   }, [baseUrl, token]);
 
-  /* FIX 4: Read from nested frontend/worker sub-objects */
-  const getMetricVal = (m, key) => {
-    const fe = m.frontend || {};
-    const wk = m.worker || {};
-    switch (key) {
-      case "inflight": return (fe.inflight_requests ?? 0) + (wk.requests_running ?? 0);
-      case "queued": return (fe.queued_requests ?? 0) + (wk.requests_waiting ?? 0);
-      case "tps": return fe.total_requests ?? 0;
-      default: return 0;
-    }
-  };
+  const LiveDot = () => (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <div style={{ width: 6, height: 6, borderRadius: "50%", background: metrics ? T.success : T.warning, animation: "pulse 2s infinite" }} />
+      <span style={{ fontSize: 10, color: T.textTert }}>{metrics ? "LIVE" : "…"}</span>
+    </div>
+  );
 
   const Sparkline = ({ data, key_, color }) => {
-    if (data.length < 2) return <div style={{ height: 36, background: T.bg, borderRadius: 6 }} />;
-    const vals = data.map(d => d[key_] ?? 0); const max = Math.max(...vals, 1);
+    const vals = data.map(d => d[key_] ?? 0);
+    if (vals.length < 2 || vals.every(v => v === 0)) return <div style={{ height: 36, background: T.bg, borderRadius: 6 }} />;
+    const max = Math.max(...vals, 1);
     const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * 200},${36 - (v / max) * 34}`).join(" ");
-    return <svg viewBox={`0 0 200 36`} style={{ width: "100%", height: 36 }}><polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} /><polyline points={`0,36 ${pts} 200,36`} fill={color + "20"} stroke="none" /></svg>;
+    return <svg viewBox="0 0 200 36" style={{ width: "100%", height: 36 }}><polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} /><polyline points={`0,36 ${pts} 200,36`} fill={color + "20"} stroke="none" /></svg>;
   };
+
+  const fe = metrics?.frontend || {};
+  const wk = metrics?.worker || {};
+
+  // Format milliseconds nicely
+  const fmtMs = (ms) => ms == null ? "—" : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
+  const fmtPct = (v) => v == null ? "—" : `${v.toFixed(1)}%`;
+
+  const inflight = metrics ? (fe.inflight_requests ?? 0) + (wk.requests_running ?? 0) : null;
+  const queued = metrics ? (fe.queued_requests ?? 0) + (wk.requests_waiting ?? 0) : null;
+  const totalReqs = metrics ? (fe.total_requests ?? 0) : null;
+  const ttft_p50 = fe.ttft_seconds?.p50 != null ? Math.round(fe.ttft_seconds.p50 * 1000) : null;
+  const ttft_p95 = fe.ttft_seconds?.p95 != null ? Math.round(fe.ttft_seconds.p95 * 1000) : null;
+  const ttft_p99 = fe.ttft_seconds?.p99 != null ? Math.round(fe.ttft_seconds.p99 * 1000) : null;
+  const itl_p50 = fe.itl_seconds?.p50 != null ? Math.round(fe.itl_seconds.p50 * 1000) : null;
+  const itl_p95 = fe.itl_seconds?.p95 != null ? Math.round(fe.itl_seconds.p95 * 1000) : null;
+  const dur_p50 = fe.request_duration_seconds?.p50 != null ? Math.round(fe.request_duration_seconds.p50 * 1000) : null;
+  const dur_p95 = fe.request_duration_seconds?.p95 != null ? Math.round(fe.request_duration_seconds.p95 * 1000) : null;
+  const gpuCache = wk.gpu_cache_usage_percent ?? null;
+  const cpuCache = wk.cpu_cache_usage_percent ?? null;
+
   return (
     <Anim>
-      {error && <div style={{ background: T.warningBg, border: `1px solid ${T.warningBorder}`, borderRadius: 8, padding: "8px 14px", fontSize: 12, color: T.warning, marginBottom: 14 }}>Metrics endpoint error: {error} — retrying every 3s</div>}
+      {error && <div style={{ background: T.warningBg, border: `1px solid ${T.warningBorder}`, borderRadius: 8, padding: "8px 14px", fontSize: 12, color: T.warning, marginBottom: 14 }}>
+        Metrics endpoint error: {error} — retrying every 3s
+      </div>}
+
+      {/* ── Row 1: Queue depth + throughput (with sparklines) ── */}
+      <div style={{ marginBottom: 8, fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.07em" }}>Throughput &amp; Queue</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 20 }}>
         {[
-          { label: "In-flight", key_: "inflight", color: T.accent, icon: "M13 10V3L4 14h7v7l9-11h-7z" },
-          { label: "Queued", key_: "queued", color: T.accent2, icon: "M4 6h16M4 10h16M4 14h16M4 18h16" },
-          { label: "Total Requests", key_: "tps", color: T.info, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
+          { label: "In-flight", value: inflight, key_: "inflight", color: T.accent, icon: "M13 10V3L4 14h7v7l9-11h-7z", fmt: v => v },
+          { label: "Queued", value: queued, key_: "queued", color: T.accent2, icon: "M4 6h16M4 10h16M4 14h16M4 18h16", fmt: v => v },
+          { label: "Total Requests", value: totalReqs, key_: "tps", color: T.info, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z", fmt: v => v?.toLocaleString() },
         ].map(kpi => (
           <Card key={kpi.label}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>{kpi.label}</span>
-              <div style={{ display: "flex", gap: 4, alignItems: "center" }}><div style={{ width: 6, height: 6, borderRadius: "50%", background: metrics ? T.success : T.warning, animation: "pulse 2s infinite" }} /><span style={{ fontSize: 10, color: T.textTert }}>{metrics ? "LIVE" : "…"}</span></div>
+              <LiveDot />
             </div>
-            <div style={{ fontSize: 28, fontWeight: 700, color: T.text, marginBottom: 8 }}>{metrics ? getMetricVal(metrics, kpi.key_) : "—"}</div>
+            <div style={{ fontSize: 28, fontWeight: 700, color: T.text, marginBottom: 8 }}>{kpi.value != null ? kpi.fmt(kpi.value) : "—"}</div>
             <Sparkline data={history} key_={kpi.key_} color={kpi.color} />
           </Card>
         ))}
       </div>
-      {!metrics && !error && <div style={{ textAlign: "center", padding: 40, color: T.textTert, fontSize: 13 }}>Connecting to live metrics…<br /><span style={{ fontSize: 11 }}>Polling /admin/dynamo/metrics every 3s</span></div>}
+
+      {/* ── Row 2: TTFT percentiles + ITL + request duration ── */}
+      <div style={{ marginBottom: 8, fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.07em" }}>Latency (Time-to-First-Token &amp; Inter-Token)</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 20 }}>
+        {/* TTFT */}
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>TTFT</span>
+            <LiveDot />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[["p50", ttft_p50], ["p95", ttft_p95], ["p99", ttft_p99]].map(([lbl, val]) => (
+              <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: T.textSec, fontWeight: 600 }}>{lbl}</span>
+                <span style={{ fontSize: 18, fontWeight: 700, color: val != null && val > 2000 ? T.danger : val != null && val > 1000 ? T.warning : T.text }}>{fmtMs(val)}</span>
+              </div>
+            ))}
+          </div>
+          <Sparkline data={history} key_="ttft_p95" color={T.accent} />
+        </Card>
+
+        {/* ITL */}
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>Inter-Token Latency</span>
+            <LiveDot />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[["p50", itl_p50], ["p95", itl_p95]].map(([lbl, val]) => (
+              <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: T.textSec, fontWeight: 600 }}>{lbl}</span>
+                <span style={{ fontSize: 18, fontWeight: 700, color: val != null && val > 100 ? T.warning : T.text }}>{fmtMs(val)}</span>
+              </div>
+            ))}
+          </div>
+          <Sparkline data={history} key_="itl_p95" color={T.accent2} />
+        </Card>
+
+        {/* Request duration */}
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>Request Duration</span>
+            <LiveDot />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[["p50", dur_p50], ["p95", dur_p95]].map(([lbl, val]) => (
+              <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: T.textSec, fontWeight: 600 }}>{lbl}</span>
+                <span style={{ fontSize: 18, fontWeight: 700, color: T.text }}>{fmtMs(val)}</span>
+              </div>
+            ))}
+          </div>
+          <Sparkline data={history} key_="ttft_p95" color={T.info} />
+        </Card>
+      </div>
+
+      {/* ── Row 3: KV cache utilization ── */}
+      <div style={{ marginBottom: 8, fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.07em" }}>KV Cache &amp; Engine</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 14, marginBottom: 20 }}>
+        {[
+          { label: "GPU KV Cache", value: gpuCache, color: gpuCache != null && gpuCache > 90 ? T.danger : gpuCache != null && gpuCache > 70 ? T.warning : T.success },
+          { label: "CPU KV Cache", value: cpuCache, color: cpuCache != null && cpuCache > 90 ? T.danger : cpuCache != null && cpuCache > 70 ? T.warning : T.success },
+        ].map(({ label, value, color }) => (
+          <Card key={label}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</span>
+              <LiveDot />
+            </div>
+            <div style={{ fontSize: 32, fontWeight: 700, color, marginBottom: 10 }}>{fmtPct(value)}</div>
+            {value != null && (
+              <div style={{ height: 8, background: T.bg, borderRadius: 4, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.min(value, 100)}%`, background: color, borderRadius: 4, transition: "width 0.4s ease" }} />
+              </div>
+            )}
+          </Card>
+        ))}
+      </div>
+
+      {!metrics && !error && <div style={{ textAlign: "center", padding: 40, color: T.textTert, fontSize: 13 }}>
+        Connecting to live metrics…<br /><span style={{ fontSize: 11 }}>Polling /admin/dynamo/metrics every 3s</span>
+      </div>}
     </Anim>
   );
 }
