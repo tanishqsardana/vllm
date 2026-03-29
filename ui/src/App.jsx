@@ -185,9 +185,15 @@ function OverviewTab({ baseUrl, token }) {
   useEffect(() => {
     Promise.all([
       apiFetch(baseUrl, "/admin/tenants", { token }).catch(() => []),
-      apiFetch(baseUrl, "/admin/usage/summary", { token }).catch(() => ({})),
       apiFetch(baseUrl, "/version").catch(() => ({})),
-    ]).then(([tenants, usage, version]) => { setData({ tenants, usage, version }); setLoading(false); });
+    ]).then(([tenants, version]) => {
+      const usage = {
+        total_requests: tenants.reduce((s, t) => s + (t.total_requests || 0), 0),
+        total_tokens: tenants.reduce((s, t) => s + (t.total_tokens || 0), 0),
+      };
+      setData({ tenants, usage, version });
+      setLoading(false);
+    });
   }, []);
   if (loading) return <div style={{ padding: 40, textAlign: "center", color: T.textTert }}><Spinner size={20} /></div>;
   const tenants = data?.tenants || []; const usage = data?.usage || {}; const version = data?.version || {};
