@@ -25,6 +25,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DYNAMO_FRONTEND_PORT=8001 \
     DYNAMO_WORKER_METRICS_PORT=8081
 
+USER root
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -40,9 +42,17 @@ RUN python -m pip install --no-cache-dir \
     "pyyaml==${PYYAML_VERSION}" \
     "PyJWT==${PYJWT_VERSION}"
 
+
 RUN useradd --create-home --uid 10001 --shell /bin/bash appuser \
     && mkdir -p /app /cache /data \
-    && chown -R appuser:appuser /app /cache /data
+    && chown -R appuser:appuser /app /cache /data \
+    && chmod -R 777 /home/dynamo || true \
+    && mkdir -p /home/dynamo/.cache /home/dynamo/.config /home/dynamo/.local \
+    && chmod -R 777 /home/dynamo
+
+# Fix FlashInfer/matplotlib cache permissions for appuser
+RUN mkdir -p /home/dynamo/.cache /home/dynamo/.config \
+    && chmod -R 777 /home/dynamo/.cache /home/dynamo/.config
 
 WORKDIR /app
 COPY services/combined/entrypoint.sh /app/entrypoint.sh
@@ -50,6 +60,7 @@ COPY services/combined/gateway /app/gateway
 COPY config /app/config
 COPY profiles /app/profiles
 RUN chmod +x /app/entrypoint.sh
+
 
 USER appuser
 EXPOSE 8000

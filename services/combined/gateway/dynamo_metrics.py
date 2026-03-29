@@ -13,9 +13,9 @@ from .utils import json_log
 
 
 _METRIC_LINE = re.compile(
-    r'^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)'
-    r'(?:\{(?P<labels>[^}]*)\})?'
-    r'\s+(?P<value>\S+)'
+    r'^([a-zA-Z_:][a-zA-Z0-9_:]*)'
+    r'(?:\{([^}]*)\})?'
+    r'\s+(\S+)'
     r'(?:\s+\S+)?$'
 )
 
@@ -32,9 +32,9 @@ def _parse_prometheus_text(text: str) -> list[dict[str, Any]]:
         match = _METRIC_LINE.match(line)
         if not match:
             continue
-        name = match.group("n")
-        raw_labels = match.group("labels") or ""
-        raw_value = match.group("value")
+        name = match.group(1)
+        raw_labels = match.group(2) or ""
+        raw_value = match.group(3)
 
         labels: dict[str, str] = {}
         for lm in _LABEL_PAIR.finditer(raw_labels):
@@ -191,6 +191,10 @@ class DynamoMetricsScraper:
         if total_requests is not None:
             frontend["total_requests"] = int(total_requests)
 
+        disconnected = _find_metric(frontend_metrics, "dynamo_frontend_disconnected_clients")
+        if disconnected is not None:
+            frontend["disconnected_clients"] = int(disconnected)
+
         # TTFT percentiles
         ttft_p50 = _extract_histogram_percentile(
             frontend_metrics, "dynamo_frontend_time_to_first_token_seconds", 0.5
@@ -234,6 +238,18 @@ class DynamoMetricsScraper:
                 "p95": dur_p95,
             }
 
+        # Cached tokens
+        cached_p50 = _extract_histogram_percentile(
+            frontend_metrics, "dynamo_frontend_cached_tokens", 0.5
+        )
+        if cached_p50 is not None:
+            cached_sum = _find_metric(frontend_metrics, "dynamo_frontend_cached_tokens_sum")
+            cached_count = _find_metric(frontend_metrics, "dynamo_frontend_cached_tokens_count")
+            frontend["cached_tokens"] = {
+                "sum": int(cached_sum) if cached_sum is not None else 0,
+                "count": int(cached_count) if cached_count is not None else 0,
+            }
+
         # --- Worker / vLLM engine metrics ---
         worker: dict[str, Any] = {}
 
@@ -267,6 +283,10 @@ class DynamoMetricsScraper:
         component_requests = _find_metric(worker_metrics, "dynamo_component_requests_total")
         if component_requests is not None:
             worker["dynamo_component_requests_total"] = int(component_requests)
+
+        component_inflight = _find_metric(worker_metrics, "dynamo_component_inflight_requests")
+        if component_inflight is not None:
+            worker["dynamo_component_inflight"] = int(component_inflight)
 
         return {
             "ts": time.time(),

@@ -32,6 +32,7 @@ export DYN_FILE_KV="${DYN_FILE_KV:-/data/dynamo_kv}"
 # Enable Dynamo worker system metrics endpoint
 export DYN_SYSTEM_PORT="${DYNAMO_WORKER_METRICS_PORT}"
 mkdir -p "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}" "${VLLM_CACHE_ROOT}" /data "${DYN_FILE_KV}"
+mkdir -p /cache/flashinfer 
 
 if [[ -n "${HF_TOKEN:-}" ]]; then
   export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
@@ -65,14 +66,14 @@ trap handle_signal SIGTERM SIGINT
 echo "[entrypoint] starting Dynamo frontend on port ${DYNAMO_FRONTEND_PORT}"
 python3 -m dynamo.frontend \
   --http-port "${DYNAMO_FRONTEND_PORT}" \
-  --store-kv file &
+  --discovery-backend file &
 DYNAMO_FRONTEND_PID=$!
 
 # --- Dynamo vLLM worker ---
 WORKER_CMD=(
   python3 -m dynamo.vllm
   --model "${MODEL_ID}"
-  --store-kv file
+  --discovery-backend file
   --kv-events-config '{"enable_kv_cache_events": false}'
   --dtype "${DTYPE}"
   --tensor-parallel-size "${TENSOR_PARALLEL}"
