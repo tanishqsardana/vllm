@@ -1365,16 +1365,18 @@ async def chat_completions(request: Request) -> Response:
         )
         return error_response(code, etype, message, request_id=request_id)
 
+    # Tenant-mismatch check comes first so callers can't enumerate whether a key
+    # is revoked/inactive on a different tenant (information leak prevention).
+    expected_tenant_id = request.headers.get("x-expected-tenant-id")
+    if expected_tenant_id and expected_tenant_id != tenant_id:
+        return finalize_error(403, "unauthorized", "tenant mismatch: API key does not belong to the selected tenant", rejection_reason="auth")
+
     if auth_row.get("revoked_at") is not None:
         return finalize_error(401, "unauthorized", "API key revoked", rejection_reason="auth")
     if not bool(auth_row.get("tenant_is_active")):
         return finalize_error(401, "unauthorized", "tenant inactive", rejection_reason="auth")
     if not bool(auth_row.get("seat_is_active")):
         return finalize_error(401, "unauthorized", "seat inactive", rejection_reason="auth")
-
-    expected_tenant_id = request.headers.get("x-expected-tenant-id")
-    if expected_tenant_id and expected_tenant_id != tenant_id:
-        return finalize_error(403, "unauthorized", "tenant mismatch: API key does not belong to the selected tenant", rejection_reason="auth")
 
     try:
         body = await request.body()

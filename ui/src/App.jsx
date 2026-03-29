@@ -312,6 +312,7 @@ function LiveTab({ baseUrl, token }) {
           ttft_p95: fe.ttft_seconds?.p95 != null ? Math.round(fe.ttft_seconds.p95 * 1000) : null,
           itl_p95: fe.itl_seconds?.p95 != null ? Math.round(fe.itl_seconds.p95 * 1000) : null,
           gpu_cache: wk.gpu_cache_usage_percent ?? null,
+          prefix_hit_rate: wk.prefix_cache_hit_rate ?? null,
         };
         histRef.current = [...histRef.current.slice(-59), point];
         setHistory([...histRef.current]);
@@ -354,7 +355,11 @@ function LiveTab({ baseUrl, token }) {
   const dur_p50 = fe.request_duration_seconds?.p50 != null ? Math.round(fe.request_duration_seconds.p50 * 1000) : null;
   const dur_p95 = fe.request_duration_seconds?.p95 != null ? Math.round(fe.request_duration_seconds.p95 * 1000) : null;
   const gpuCache = wk.gpu_cache_usage_percent ?? null;
-  const cpuCache = wk.cpu_cache_usage_percent ?? null;
+  const prefixHitRate = wk.prefix_cache_hit_rate ?? null;
+  const tokensBySource = wk.prompt_tokens_by_source || null;
+  const totalSourceTokens = tokensBySource
+    ? tokensBySource.local_compute + tokensBySource.local_cache_hit + tokensBySource.external_kv_transfer
+    : 0;
 
   return (
     <Anim>
@@ -436,26 +441,81 @@ function LiveTab({ baseUrl, token }) {
         </Card>
       </div>
 
-      {/* ── Row 3: KV cache utilization ── */}
-      <div style={{ marginBottom: 8, fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.07em" }}>KV Cache &amp; Engine</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 14, marginBottom: 20 }}>
-        {[
-          { label: "GPU KV Cache", value: gpuCache, color: gpuCache != null && gpuCache > 90 ? T.danger : gpuCache != null && gpuCache > 70 ? T.warning : T.success },
-          { label: "CPU KV Cache", value: cpuCache, color: cpuCache != null && cpuCache > 90 ? T.danger : cpuCache != null && cpuCache > 70 ? T.warning : T.success },
-        ].map(({ label, value, color }) => (
-          <Card key={label}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</span>
-              <LiveDot />
-            </div>
-            <div style={{ fontSize: 32, fontWeight: 700, color, marginBottom: 10 }}>{fmtPct(value)}</div>
-            {value != null && (
-              <div style={{ height: 8, background: T.bg, borderRadius: 4, overflow: "hidden" }}>
-                <div style={{ height: "100%", width: `${Math.min(value, 100)}%`, background: color, borderRadius: 4, transition: "width 0.4s ease" }} />
+      {/* ── Row 3: KV cache utilization + prefix cache hit rate ── */}
+      <div style={{ marginBottom: 8, fontSize: 11, fontWeight: 700, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.07em" }}>KV Cache &amp; Prefix Caching</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 20 }}>
+        {/* KV Cache Occupancy */}
+        {(() => {
+          const cacheColor = gpuCache != null && gpuCache > 90 ? T.danger : gpuCache != null && gpuCache > 70 ? T.warning : T.success;
+          return (
+            <Card>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>KV Cache Used</span>
+                <LiveDot />
               </div>
-            )}
-          </Card>
-        ))}
+              <div style={{ fontSize: 32, fontWeight: 700, color: cacheColor, marginBottom: 10 }}>{fmtPct(gpuCache)}</div>
+              <div style={{ height: 8, background: T.bg, borderRadius: 4, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.min(gpuCache ?? 0, 100)}%`, background: cacheColor, borderRadius: 4, transition: "width 0.4s ease" }} />
+              </div>
+              <Sparkline data={history} key_="gpu_cache" color={cacheColor} />
+            </Card>
+          );
+        })()}
+
+        {/* Prefix Cache Hit Rate */}
+        {(() => {
+          const hitColor = prefixHitRate != null && prefixHitRate > 50 ? T.success : prefixHitRate != null && prefixHitRate > 20 ? T.warning : T.accent2;
+          return (
+            <Card>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>Prefix Cache Hit Rate</span>
+                <LiveDot />
+              </div>
+              <div style={{ fontSize: 32, fontWeight: 700, color: hitColor, marginBottom: 6 }}>{fmtPct(prefixHitRate)}</div>
+              {wk.prefix_cache_hits != null && (
+                <div style={{ fontSize: 11, color: T.textTert, marginBottom: 8 }}>
+                  {(wk.prefix_cache_hits || 0).toLocaleString()} / {(wk.prefix_cache_queries || 0).toLocaleString()} tokens from cache
+                </div>
+              )}
+              <div style={{ height: 8, background: T.bg, borderRadius: 4, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.min(prefixHitRate ?? 0, 100)}%`, background: hitColor, borderRadius: 4, transition: "width 0.4s ease" }} />
+              </div>
+              <Sparkline data={history} key_="prefix_hit_rate" color={hitColor} />
+            </Card>
+          );
+        })()}
+
+        {/* Token Source Breakdown */}
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: T.textTert, textTransform: "uppercase", letterSpacing: "0.05em" }}>Token Sources</span>
+            <LiveDot />
+          </div>
+          {tokensBySource ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {[
+                { label: "Local cache hit", val: tokensBySource.local_cache_hit, color: T.success },
+                { label: "Computed fresh", val: tokensBySource.local_compute, color: T.accent2 },
+                { label: "External KV xfer", val: tokensBySource.external_kv_transfer, color: T.info },
+              ].map(({ label, val, color }) => {
+                const pct = totalSourceTokens > 0 ? (val / totalSourceTokens) * 100 : 0;
+                return (
+                  <div key={label}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+                      <span style={{ color: T.textSec }}>{label}</span>
+                      <span style={{ fontWeight: 700, color }}>{val.toLocaleString()} <span style={{ color: T.textTert, fontWeight: 400 }}>({pct.toFixed(0)}%)</span></span>
+                    </div>
+                    <div style={{ height: 4, background: T.bg, borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 2, transition: "width 0.4s ease" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, color: T.textTert, paddingTop: 8 }}>Waiting for requests…</div>
+          )}
+        </Card>
       </div>
 
       {!metrics && !error && <div style={{ textAlign: "center", padding: 40, color: T.textTert, fontSize: 13 }}>

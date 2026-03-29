@@ -261,14 +261,42 @@ class DynamoMetricsScraper:
         if success_total > 0:
             worker["request_success_total"] = int(success_total)
 
-        # KV cache utilization from vLLM
-        gpu_cache_usage = _find_metric(worker_metrics, "vllm:gpu_cache_usage_perc")
-        if gpu_cache_usage is not None:
-            worker["gpu_cache_usage_percent"] = round(gpu_cache_usage * 100, 2)
+        # KV cache occupancy — correct metric name is vllm:kv_cache_usage_perc (0.0–1.0 scale).
+        # Fall back to Dynamo's own gauge if the vLLM metric is absent.
+        kv_cache_usage = _find_metric(worker_metrics, "vllm:kv_cache_usage_perc")
+        if kv_cache_usage is not None:
+            worker["gpu_cache_usage_percent"] = round(kv_cache_usage * 100, 2)
+        else:
+            dynamo_gpu_cache = _find_metric(worker_metrics, "dynamo_component_gpu_cache_usage_percent")
+            if dynamo_gpu_cache is not None:
+                worker["gpu_cache_usage_percent"] = round(dynamo_gpu_cache * 100, 2)
 
-        cpu_cache_usage = _find_metric(worker_metrics, "vllm:cpu_cache_usage_perc")
-        if cpu_cache_usage is not None:
-            worker["cpu_cache_usage_percent"] = round(cpu_cache_usage * 100, 2)
+        # Prefix cache hit rate — queries and hits are cumulative counters (tokens, not requests).
+        prefix_hits = _find_metric(worker_metrics, "vllm:prefix_cache_hits_total")
+        prefix_queries = _find_metric(worker_metrics, "vllm:prefix_cache_queries_total")
+        if prefix_hits is not None and prefix_queries is not None:
+            worker["prefix_cache_hits"] = int(prefix_hits)
+            worker["prefix_cache_queries"] = int(prefix_queries)
+            worker["prefix_cache_hit_rate"] = (
+                round((prefix_hits / prefix_queries) * 100, 1) if prefix_queries > 0 else 0.0
+            )
+
+        # Token source breakdown: how many prompt tokens came from cache vs fresh compute.
+        tokens_compute = _find_metric(
+            worker_metrics, "vllm:prompt_tokens_by_source_total", {"source": "local_compute"}
+        )
+        tokens_cache_hit = _find_metric(
+            worker_metrics, "vllm:prompt_tokens_by_source_total", {"source": "local_cache_hit"}
+        )
+        tokens_external = _find_metric(
+            worker_metrics, "vllm:prompt_tokens_by_source_total", {"source": "external_kv_transfer"}
+        )
+        if any(v is not None for v in [tokens_compute, tokens_cache_hit, tokens_external]):
+            worker["prompt_tokens_by_source"] = {
+                "local_compute": int(tokens_compute or 0),
+                "local_cache_hit": int(tokens_cache_hit or 0),
+                "external_kv_transfer": int(tokens_external or 0),
+            }
 
         # Running/waiting requests from vLLM
         num_running = _find_metric(worker_metrics, "vllm:num_requests_running")
